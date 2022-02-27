@@ -1,18 +1,21 @@
-use hyper::{Client, Body, Method, Request};
-use serde::de::{DeserializeOwned};
-use serde;
 use base64::encode;
-use bitcoin::util::uint::Uint256;
+use bitcoin::blockdata::transaction::Transaction;
+use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
-use bitcoin::blockdata::transaction::{Transaction};
-use bitcoin::hash_types::{Txid, BlockHash};
-use bitcoin::util::psbt::serialize::{Deserialize};
+use bitcoin::util::psbt::serialize::Deserialize;
+use bitcoin::util::uint::Uint256;
+use hyper::{Body, Client, Method, Request};
+use serde;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use serde_json::value::Value;
 
+use std::collections::{HashSet};
+
+use crate::drive::deposit::Deposit;
 use std::str::FromStr;
 
-use crate::lib::deposit::{Deposit};
+use bitcoin::util::psbt::serialize::Serialize;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -33,7 +36,11 @@ pub struct VerifiedBMM {
 
 impl DrivechainClient {
     #[tokio::main]
-    async fn send_request<T: DeserializeOwned>(&self, method: &str, params: &Vec<serde_json::Value>) -> Result<T, Error> {
+    async fn send_request<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &Vec<serde_json::Value>,
+    ) -> Result<T, Error> {
         let auth = format!("{}:{}", self.rpcuser, self.rpcpassword);
         let req = Request::builder()
             .method(Method::POST)
@@ -48,7 +55,9 @@ impl DrivechainClient {
                     "id": "SidechainClient",
                     "method": method,
                     "params": params}
-                ).to_string()))?;
+                )
+                .to_string(),
+            ))?;
 
         let client = Client::new();
 
@@ -57,11 +66,15 @@ impl DrivechainClient {
         let body = hyper::body::to_bytes(body).await?;
         let body: Vec<u8> = body.into_iter().collect();
         let result: T = serde_json::from_slice::<T>(body.as_slice())?;
-        return Ok(result)
+        return Ok(result);
     }
 
     // check that a block was successfuly bmmed
-    pub fn verify_bmm(&self, main_block_hash: &BlockHash, critical_hash: &Uint256) -> Result<VerifiedBMM, Error> {
+    pub fn verify_bmm(
+        &self,
+        main_block_hash: &BlockHash,
+        critical_hash: &Uint256,
+    ) -> Result<VerifiedBMM, Error> {
         let params = vec![
             json!(main_block_hash.to_string()),
             json!(critical_hash.to_string()),
@@ -84,7 +97,13 @@ impl DrivechainClient {
         })
     }
 
-    pub fn send_bmm_request(&self, critical_hash: &Uint256, prev_main_block_hash: &BlockHash, height: usize, amount: Amount) -> Txid {
+    pub fn send_bmm_request(
+        &self,
+        critical_hash: &Uint256,
+        prev_main_block_hash: &BlockHash,
+        height: usize,
+        amount: Amount,
+    ) -> Txid {
         println!("send_bmm_request");
         let str_hash_prev = prev_main_block_hash.to_string();
         let params = vec![
@@ -94,44 +113,31 @@ impl DrivechainClient {
             json!(self.this_sidechain),
             json!(str_hash_prev[str_hash_prev.len() - 4..]),
         ];
-        let value = self.send_request::<Value>("createbmmcriticaldatatx", &params).unwrap();
+        let value = self
+            .send_request::<Value>("createbmmcriticaldatatx", &params)
+            .unwrap();
         let txid = Txid::from_str(value["result"]["txid"]["txid"].as_str().unwrap()).unwrap();
         txid
     }
 
-    pub fn get_tx(&self, txid: &Txid) {
-        let params = vec![
-            json!(txid.to_string()),
-        ];
-        let value = self.send_request::<Value>("gettx", &params).unwrap();
-    }
-
-    pub fn get_block(&self, block_hash: &BlockHash) {
-        let params = vec![
-            json!(block_hash.to_string()),
-        ];
-        let value = self.send_request::<Value>("getblock", &params).unwrap();
-    }
-
     // get active mainchain tip
     pub fn get_mainchain_tip(&self) -> Option<BlockHash> {
-        let params = vec![
-        ];
+        let params = vec![];
         let value = self.send_request::<Value>("getchaintips", &params).unwrap();
         for tip in value["result"].as_array().unwrap() {
             if tip["status"] == "active" {
                 let active_tip = BlockHash::from_str(tip["hash"].as_str().unwrap()).unwrap();
                 return Some(active_tip);
             }
-        };
+        }
         None
     }
 
     pub fn get_tx_block_hash(&self, txid: &Txid) -> Option<BlockHash> {
-        let params = vec![
-            json!(txid.to_string()),
-        ];
-        let value = self.send_request::<Value>("gettransaction", &params).unwrap();
+        let params = vec![json!(txid.to_string())];
+        let value = self
+            .send_request::<Value>("gettransaction", &params)
+            .unwrap();
         if let Some(block_hash) = value["result"].get("blockhash") {
             Some(BlockHash::from_str(block_hash.as_str().unwrap()).unwrap())
         } else {
@@ -140,26 +146,23 @@ impl DrivechainClient {
     }
 
     pub fn get_prev_block_hash(&self, block_hash: &BlockHash) -> Option<BlockHash> {
-        let params = vec![
-            json!(block_hash.to_string()),
-        ];
+        let params = vec![json!(block_hash.to_string())];
         let value = self.send_request::<Value>("getblock", &params).unwrap();
         let prev_block_hash = &value["result"]["previousblockhash"];
         Some(BlockHash::from_str(prev_block_hash.as_str().unwrap()).unwrap())
     }
 
     pub fn get_block_count(&self) -> usize {
-        let params = vec![
-        ];
-        let value = self.send_request::<Value>("getblockcount", &params).unwrap();
+        let params = vec![];
+        let value = self
+            .send_request::<Value>("getblockcount", &params)
+            .unwrap();
         let count = value["result"].as_u64().unwrap();
         count as usize
     }
 
     pub fn get_block_hash(&self, height: usize) -> BlockHash {
-        let params = vec![
-            json!(height),
-        ];
+        let params = vec![json!(height)];
         let value = self.send_request::<Value>("getblockhash", &params).unwrap();
         let block_hash = BlockHash::from_str(value["result"].as_str().unwrap()).unwrap();
         block_hash
@@ -172,22 +175,30 @@ impl DrivechainClient {
                 json!(txid.to_string()),
                 json!(nburnindex),
             ],
-            None => vec![
-                json!(self.key_hash),
-            ],
+            None => vec![json!(self.key_hash)],
         };
-        let value = self.send_request::<Value>("listsidechaindeposits", &params).unwrap();
-        value["result"].as_array().unwrap().iter().map(|val| {
-            Deposit{
-                blockhash: BlockHash::from_str(val["hashblock"].as_str().unwrap()).unwrap(),
-                ntx: val["ntx"].as_u64().unwrap() as usize,
-                nburnindex: val["nburnindex"].as_u64().unwrap() as usize,
-                tx: Transaction::deserialize(hex::decode(val["txhex"].as_str().unwrap()).unwrap().as_slice()).unwrap(),
-                nsidechain: val["nsidechain"].as_u64().unwrap() as usize,
-                strdest: val["strdest"].as_str().unwrap().into(),
-                prev_txid: None,
-            }
-        }).collect()
+        let value = self
+            .send_request::<Value>("listsidechaindeposits", &params)
+            .unwrap();
+        if let Some(result) = value["result"].as_array() {
+            return result
+                .iter()
+                .map(|val| Deposit {
+                    blockhash: BlockHash::from_str(val["hashblock"].as_str().unwrap()).unwrap(),
+                    ntx: val["ntx"].as_u64().unwrap() as usize,
+                    nburnindex: val["nburnindex"].as_u64().unwrap() as usize,
+                    tx: Transaction::deserialize(
+                        hex::decode(val["txhex"].as_str().unwrap())
+                            .unwrap()
+                            .as_slice(),
+                    )
+                    .unwrap(),
+                    nsidechain: val["nsidechain"].as_u64().unwrap() as usize,
+                    strdest: val["strdest"].as_str().unwrap().into(),
+                })
+                .collect();
+        }
+        vec![]
     }
 
     pub fn verify_deposit(&self, deposit: &Deposit) -> bool {
@@ -196,12 +207,69 @@ impl DrivechainClient {
             json!(deposit.tx.txid().to_string()),
             json!(deposit.ntx),
         ];
-        let value = self.send_request::<Value>("verifydeposit", &params).unwrap();
+        let value = self
+            .send_request::<Value>("verifydeposit", &params)
+            .unwrap();
         if let Some(txid) = value.get("result") {
+            if txid.is_null() {
+                return false;
+            }
             let txid = Txid::from_str(txid.as_str().unwrap()).unwrap();
             deposit.tx.txid() == txid
         } else {
             false
         }
+    }
+
+    pub fn broadcast_withdrawal_bundle(&self, wttx: &Transaction) -> Option<Txid> {
+        let params = vec![
+            json!(self.this_sidechain),
+            json!(hex::encode(wttx.serialize())),
+        ];
+        let value = self
+            .send_request::<Value>("receivewithdrawalbundle", &params)
+            .unwrap();
+        value["result"]
+            .get("wtxid")
+            .map(|txid| Txid::from_str(txid.as_str().unwrap()).unwrap())
+    }
+
+    pub fn get_raw_transaction(&self, txid: String) -> Option<Transaction> {
+        let params = vec![json!(txid)];
+        let value = self
+            .send_request::<Value>("getrawtransaction", &params)
+            .unwrap();
+        let bytes = hex::decode(value["result"].as_str().unwrap())
+            .expect("failed to decode bytes from hex string");
+        Transaction::deserialize(bytes.as_slice()).ok()
+    }
+
+    pub fn get_spent_withdrawal_bundle_hashes(&self) -> Vec<String> {
+        let params = vec![];
+        let value = self
+            .send_request::<Value>("listspentwithdrawals", &params)
+            .unwrap();
+        if let Some(result) = value["result"].as_array() {
+            return result
+                .iter()
+                .filter(|v| v["nsidechain"].as_u64().unwrap() as usize == self.this_sidechain)
+                .map(|v| v["hash"].as_str().unwrap().into())
+                .collect();
+        }
+        vec![]
+    }
+
+    pub fn get_pending_withdrawal_bundle_blind_hashes(&self) -> HashSet<String> {
+        let params = vec![json!(self.this_sidechain)];
+        let value = self
+            .send_request::<Value>("listwithdrawalstatus", &params)
+            .unwrap();
+        if let Some(result) = value["result"].as_array() {
+            return result
+                .iter()
+                .map(|v| v["hash"].as_str().unwrap().into())
+                .collect();
+        }
+        HashSet::new()
     }
 }

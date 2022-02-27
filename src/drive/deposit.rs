@@ -1,9 +1,9 @@
-use bitcoin::util::amount::{Amount, Denomination};
+use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
+use bitcoin::hash_types::{BlockHash, Txid};
+use bitcoin::hashes::Hash;
+use bitcoin::util::amount::{Amount};
+use bitcoin::util::psbt::serialize::{Deserialize, Serialize};
 use serde::de::{Deserializer, Error as SerdeError};
-use bitcoin::util::psbt::serialize::{Serialize, Deserialize};
-use bitcoin::blockdata::transaction::{Transaction, OutPoint, TxOut};
-use bitcoin::hash_types::{Txid, BlockHash};
-use bitcoin::hashes::{Hash};
 
 #[derive(Debug, Clone)]
 pub struct Deposit {
@@ -13,18 +13,16 @@ pub struct Deposit {
     pub tx: Transaction,
     pub nsidechain: usize,
     pub strdest: String,
-    pub prev_txid: Option<Txid>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SerdeDeposit {
-    blockhash: [u8;32],
+    blockhash: [u8; 32],
     ntx: usize,
     nburnindex: usize,
     tx: Vec<u8>,
     nsidechain: usize,
     strdest: String,
-    prev_txid: Option<[u8;32]>,
 }
 
 impl serde::Serialize for Deposit {
@@ -32,14 +30,13 @@ impl serde::Serialize for Deposit {
     where
         S: serde::Serializer,
     {
-        let serialize_deposit = SerdeDeposit{
+        let serialize_deposit = SerdeDeposit {
             blockhash: self.blockhash.as_inner().clone(),
             ntx: self.ntx,
             nburnindex: self.nburnindex,
             tx: self.tx.serialize(),
             nsidechain: self.nsidechain,
             strdest: self.strdest.clone(),
-            prev_txid: self.prev_txid.map(|txid| { txid.as_inner().clone() }),
         };
 
         serialize_deposit.serialize(serializer)
@@ -57,17 +54,16 @@ impl<'de> serde::Deserialize<'de> for Deposit {
                     Ok(tx) => Ok(tx),
                     Err(err) => Err(D::Error::custom(err)),
                 };
-                let deposit = Deposit{
+                let deposit = Deposit {
                     blockhash: BlockHash::from_inner(sd.blockhash),
                     ntx: sd.ntx,
                     nburnindex: sd.nburnindex,
                     tx: tx?,
                     nsidechain: sd.nsidechain,
                     strdest: sd.strdest,
-                    prev_txid: sd.prev_txid.map(|txid| { Txid::from_inner(txid) }),
                 };
                 Ok(deposit)
-            },
+            }
             Err(err) => Err(D::Error::custom(err)),
         }
     }
@@ -88,4 +84,21 @@ impl Deposit {
     pub fn amount(&self) -> Amount {
         Amount::from_sat(self.tx.output[self.nburnindex].value)
     }
+
+    pub fn is_spent_by(&self, other: &Deposit) -> bool {
+        other
+            .tx
+            .input
+            .iter()
+            .filter(|input| input.previous_output == self.outpoint())
+            .count()
+            == 1
+    }
+}
+
+#[derive(Debug)]
+pub struct DepositOutput {
+    pub index: usize,
+    pub address: String,
+    pub amount: Amount,
 }
