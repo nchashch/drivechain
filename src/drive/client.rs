@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use serde_json::value::Value;
 
-use std::collections::{HashSet};
+use std::collections::HashSet;
 
 use crate::drive::deposit::Deposit;
 use std::str::FromStr;
@@ -232,16 +232,6 @@ impl DrivechainClient {
         value["result"]
             .get("wtxid")
             .map(|txid| Txid::from_str(txid.as_str().unwrap()).unwrap())
-    }
-
-    pub fn get_raw_transaction(&self, txid: String) -> Option<Transaction> {
-        let params = vec![json!(txid)];
-        let value = self
-            .send_request::<Value>("getrawtransaction", &params)
-            .unwrap();
-        let bytes = hex::decode(value["result"].as_str().unwrap())
-            .expect("failed to decode bytes from hex string");
-        Transaction::deserialize(bytes.as_slice()).ok()
     }
 
     pub fn get_spent_withdrawal_bundle_hashes(&self) -> Vec<String> {

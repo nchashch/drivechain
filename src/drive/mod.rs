@@ -11,7 +11,9 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::util::address::Address;
 use bitcoin::util::amount::Amount;
 use bitcoin::util::uint::Uint256;
+use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
+pub use db::BlockData;
 pub use deposit::{Deposit, DepositOutput};
 use std;
 use std::collections::HashMap;
@@ -33,9 +35,9 @@ pub struct Drivechain {
 
 // The destination string for the change of a WT^
 const SIDECHAIN_WTPRIME_RETURN_DEST: &[u8] = b"D";
-const MIN_WT_COUNT: usize = 10;
-const MAX_WT_COUNT: usize = 100;
-const WT_MIN_BLOCK_COUNT: usize = 10;
+const MAX_WT_OUTPUT_COUNT: usize = 100;
+const WAITING_PERIOD: usize = 50;
+const VOTING_PERIOD: usize = 50;
 
 impl Drivechain {
     pub fn new<P: AsRef<std::path::Path>>(
@@ -45,6 +47,7 @@ impl Drivechain {
         rpcuser: String,
         rpcpassword: String,
     ) -> Drivechain {
+        dbg!("new drivechain");
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
@@ -84,11 +87,13 @@ impl Drivechain {
         let txid = self
             .client
             .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount);
+        dbg!(txid);
         let bmm_request = BMMRequest {
             txid: txid,
             critical_hash: *critical_hash,
             side_block_data: block_data.to_vec(),
         };
+        dbg!(&bmm_request);
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
         None
@@ -201,24 +206,78 @@ impl Drivechain {
         deposit_outputs
     }
 
-    pub fn create_wt_bundle(&self) -> Option<Transaction> {
-        // Add SIDECHAIN_WTPRIME_RETURN_DEST OP_RETURN output
+    pub fn collect_wt_bundles(&self) -> Vec<Transaction> {
+        let mut block_height = 0;
+        let mut bundles = vec![];
+        let last_height = match self
+            .db
+            .block_height_to_wtids
+            .last()
+            .expect("couldn't get last block number")
+        {
+            Some((last_height, _)) => last_height,
+            None => {
+                return vec![];
+            }
+        };
+        let last_height = BigEndian::read_u64(&last_height) as usize;
+        let last_height = get_waiting_end_height(last_height) + VOTING_PERIOD + WAITING_PERIOD;
+        dbg!(last_height);
+        let mut last_spent_height = 0;
+        let mut waiting_end_height = get_waiting_end_height(last_spent_height);
+        while waiting_end_height < last_height {
+            dbg!(waiting_end_height);
+            if let Some((spent_height, bundle)) =
+                self.create_wt_bundle(last_spent_height, waiting_end_height, MAX_WT_OUTPUT_COUNT)
+            {
+                last_spent_height = spent_height;
+                bundles.push(bundle);
+            }
+            waiting_end_height += VOTING_PERIOD + WAITING_PERIOD;
+        }
+        bundles
+    }
+
+    // This should be deterministic.
+    pub fn create_wt_bundle(
+        &self,
+        start: usize,
+        end: usize,
+        max_outputs: usize,
+    ) -> Option<(usize, Transaction)> {
+        let mut transactions = HashMap::new();
+        let mut total_outputs = 0;
+        let mut last_spent_height = start;
+        for block_height in start..end {
+            if let Some(block_transactions) =
+                self.db.get_block_withdrawal_transactions(block_height)
+            {
+                total_outputs += block_transactions.len();
+                if total_outputs > max_outputs {
+                    break;
+                }
+                let block_transactions = block_transactions.into_iter().filter(|(key, _)| {
+                    self.db.get_withdrawal_status(*key) == Some(withdrawal::Status::Unspent)
+                });
+                transactions.extend(block_transactions);
+                last_spent_height = block_height;
+            }
+        }
+        if transactions.len() == 0 {
+            return None;
+        }
+        dbg!(&transactions.len());
         let script = script::Builder::new()
             .push_opcode(opcodes::all::OP_RETURN)
             .push_slice(SIDECHAIN_WTPRIME_RETURN_DEST)
             .into_script();
-        let txout0 = TxOut {
+        let mut txouts = vec![];
+        let txout = TxOut {
             value: 0,
             script_pubkey: script,
         };
-        let withdrawals = self.db.get_unspent_withdrawals();
-        if withdrawals.len() == 0 {
-            return None;
-        }
-        if withdrawals.len() < MIN_WT_COUNT {
-            return None;
-        }
-        let sum_mainchain_fees: u64 = withdrawals
+        txouts.push(txout);
+        let sum_mainchain_fees: u64 = transactions
             .iter()
             .map(|(_, wt)| wt.iter().map(|out| out.mainchain_fee))
             .flatten()
@@ -228,63 +287,32 @@ impl Drivechain {
             .push_opcode(opcodes::all::OP_RETURN)
             .push_slice(sum_mainchain_fees.to_le_bytes().as_slice())
             .into_script();
-        let txout1 = TxOut {
+        let txout = TxOut {
             value: 0,
             script_pubkey: script,
         };
-        let mut dest_to_outputs: HashMap<String, (u64, Vec<[u8; 32]>)> = HashMap::new();
-        for (wtid, outs) in withdrawals.iter() {
-            for out in outs {
-                let (value, wtids) = dest_to_outputs
-                    .entry(out.dest.clone())
-                    .or_insert((0, vec![]));
-                *value += out.amount;
-                wtids.push(wtid.clone());
-            }
+        txouts.push(txout);
+        let mut address_to_amount: HashMap<String, u64> = HashMap::new();
+        for out in transactions.values().flatten() {
+            let amount = address_to_amount.entry(out.dest.clone()).or_insert(0);
+            *amount += out.amount;
         }
-        let mut dest_to_outputs = dest_to_outputs
-            .into_iter()
-            .collect::<Vec<(String, (u64, Vec<[u8; 32]>))>>();
-        // We sort all wtid vectors and all outputs lexicographicaliy to make
-        // sure is the same for the same set of withdrawals.
-        dest_to_outputs
-            .iter_mut()
-            .for_each(|(_, (_, wtids))| wtids.sort());
-        dest_to_outputs.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap());
-        let outputs = dest_to_outputs
-            .iter()
-            .map(|(dest, (value, wtids))| {
-                [
-                    vec![TxOut {
-                        value: *value,
-                        script_pubkey: Address::from_str(dest.as_str()).unwrap().script_pubkey(),
-                    }],
-                    wtids
-                        .iter()
-                        .map(|wtid| TxOut {
-                            value: 0,
-                            script_pubkey: script::Builder::new()
-                                .push_opcode(opcodes::all::OP_RETURN)
-                                .push_slice(wtid)
-                                .into_script(),
-                        })
-                        .collect(),
-                ]
-                .concat()
-            })
-            .flatten()
-            .collect();
+        txouts.extend(address_to_amount.iter().map(|(dest, amount)| TxOut {
+            value: *amount,
+            script_pubkey: Address::from_str(dest.as_str()).unwrap().script_pubkey(),
+        }));
         let mut txin = TxIn::default();
         // OP_FALSE == OP_0
         txin.script_sig = script::Builder::new()
             .push_opcode(opcodes::OP_FALSE)
             .into_script();
-        Some(Transaction {
+        let tx = Transaction {
             version: 2,
             lock_time: 0,
             input: vec![txin],
-            output: [vec![txout0, txout1], outputs].concat(),
-        })
+            output: txouts,
+        };
+        Some((last_spent_height, tx))
     }
 
     pub fn add_withdrawal(
@@ -300,14 +328,9 @@ impl Drivechain {
         Ok(())
     }
 
-    pub fn connect_block(&mut self, block: &BlockData) {
-
+    pub fn connect_block(&mut self, block: &BlockData) -> Result<(), withdrawal::Error> {
+        self.db.connect_block(block)
     }
-}
-
-pub struct BlockData {
-    block_number: usize,
-    withdrawals: HashMap<[u8;32], Vec<WithdrawalOutput>>,
 }
 
 #[derive(Debug)]
@@ -330,4 +353,24 @@ struct BMMRequest {
     txid: Txid,
     critical_hash: Uint256,
     side_block_data: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum Status {
+    Waiting,
+    Voting,
+}
+
+fn get_waiting_end_height(block_height: usize) -> usize {
+    let remainder = block_height % (WAITING_PERIOD + VOTING_PERIOD);
+    block_height - remainder + WAITING_PERIOD
+}
+
+fn get_status(block_height: usize) -> Status {
+    let remainder = block_height % (WAITING_PERIOD + VOTING_PERIOD);
+    if remainder < WAITING_PERIOD {
+        Status::Waiting
+    } else {
+        Status::Voting
+    }
 }

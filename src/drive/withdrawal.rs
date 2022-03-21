@@ -9,6 +9,7 @@ pub struct WithdrawalOutput {
 #[derive(PartialEq, Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Unspent,
+    Pending,
     Spent,
     Refunded,
 }
