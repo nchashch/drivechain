@@ -1,9 +1,9 @@
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::Hash;
-use bitcoin::util::amount::{Amount};
+use bitcoin::util::amount::Amount;
 use bitcoin::util::psbt::serialize::{Deserialize, Serialize};
-use serde::de::{Deserializer, Error as SerdeError};
+use serde::de::Error;
 
 #[derive(Debug, Clone)]
 pub struct Deposit {
@@ -31,7 +31,7 @@ impl serde::Serialize for Deposit {
         S: serde::Serializer,
     {
         let serialize_deposit = SerdeDeposit {
-            blockhash: self.blockhash.as_inner().clone(),
+            blockhash: *self.blockhash.as_inner(),
             ntx: self.ntx,
             nburnindex: self.nburnindex,
             tx: self.tx.serialize(),
@@ -46,7 +46,7 @@ impl serde::Serialize for Deposit {
 impl<'de> serde::Deserialize<'de> for Deposit {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
         match SerdeDeposit::deserialize(deserializer) {
             Ok(sd) => {

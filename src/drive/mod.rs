@@ -1,6 +1,7 @@
 mod client;
 mod db;
 mod deposit;
+mod coinbase_data;
 pub mod withdrawal;
 use bitcoin::blockdata::{
     opcodes, script,
@@ -19,6 +20,7 @@ use std;
 use std::collections::HashMap;
 use std::str::FromStr;
 pub use withdrawal::WithdrawalOutput;
+pub use coinbase_data::{CoinbaseData};
 
 #[derive(Debug)]
 pub struct Block {
@@ -67,6 +69,17 @@ impl Drivechain {
         }
     }
 
+    pub fn get_coinbase_data(&self) -> CoinbaseData {
+        let mainchain_tip_hash = self
+            .client
+            .get_mainchain_tip()
+            .expect("failed to get mainchain tip");
+        CoinbaseData {
+            prev_main_block_hash: mainchain_tip_hash,
+            deposits: None,
+        }
+    }
+
     // Attempts to blind merge mine a block.
     pub fn attempt_bmm(
         &mut self,
@@ -78,6 +91,7 @@ impl Drivechain {
             .client
             .get_mainchain_tip()
             .expect("failed to get mainchain tip");
+        // let mainchain_tip_hash = coinbase_data.prev_main_block_hash;
         // Check if any bmm request was accepted.
         if let Some(block) = self.confirm_bmm(&mainchain_tip_hash) {
             // Return block data if it was.
@@ -93,7 +107,6 @@ impl Drivechain {
             critical_hash: *critical_hash,
             side_block_data: block_data.to_vec(),
         };
-        dbg!(&bmm_request);
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
         None
@@ -285,7 +298,7 @@ impl Drivechain {
         // Add an output for mainchain fee encoding (updated later)
         let script = script::Builder::new()
             .push_opcode(opcodes::all::OP_RETURN)
-            .push_slice(sum_mainchain_fees.to_le_bytes().as_slice())
+            .push_slice(sum_mainchain_fees.to_le_bytes().as_ref())
             .into_script();
         let txout = TxOut {
             value: 0,
