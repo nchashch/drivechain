@@ -1,9 +1,8 @@
 use base64::encode;
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::hash_types::{BlockHash, Txid};
+use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
 use bitcoin::util::psbt::serialize::Deserialize;
-use bitcoin::util::uint::Uint256;
 use hyper::{Body, Client, Method, Request};
 use serde;
 use serde::de::DeserializeOwned;
@@ -73,7 +72,7 @@ impl DrivechainClient {
     pub fn verify_bmm(
         &self,
         main_block_hash: &BlockHash,
-        critical_hash: &Uint256,
+        critical_hash: &TxMerkleNode,
     ) -> Result<VerifiedBMM, Error> {
         let params = vec![
             json!(main_block_hash.to_string()),
@@ -99,7 +98,7 @@ impl DrivechainClient {
 
     pub fn send_bmm_request(
         &self,
-        critical_hash: &Uint256,
+        critical_hash: &TxMerkleNode,
         prev_main_block_hash: &BlockHash,
         height: usize,
         amount: Amount,

@@ -1,5 +1,5 @@
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
-use bitcoin::hash_types::{BlockHash, Txid};
+use bitcoin::hash_types::{BlockHash};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use bitcoin::util::psbt::serialize::{Deserialize, Serialize};

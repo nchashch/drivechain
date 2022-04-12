@@ -7,16 +7,14 @@ use bitcoin::blockdata::{
     opcodes, script,
     transaction::{Transaction, TxIn, TxOut},
 };
-use bitcoin::hash_types::{BlockHash, Txid};
+use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::util::address::Address;
 use bitcoin::util::amount::Amount;
-use bitcoin::util::uint::Uint256;
 use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
 pub use db::BlockData;
 pub use deposit::{Deposit, DepositOutput};
-use std;
 use std::collections::HashMap;
 use std::str::FromStr;
 pub use withdrawal::WithdrawalOutput;
@@ -49,7 +47,6 @@ impl Drivechain {
         rpcuser: String,
         rpcpassword: String,
     ) -> Drivechain {
-        dbg!("new drivechain");
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
@@ -83,7 +80,7 @@ impl Drivechain {
     // Attempts to blind merge mine a block.
     pub fn attempt_bmm(
         &mut self,
-        critical_hash: &Uint256,
+        critical_hash: &TxMerkleNode,
         block_data: &Vec<u8>,
         amount: Amount,
     ) -> Option<Block> {
@@ -127,7 +124,7 @@ impl Drivechain {
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid) {
                 // And we check that critical_hash was actually included in
-                // coinbase.
+                // coinbase on mainchain.
                 if let Ok(verified) = self
                     .client
                     .verify_bmm(&main_block_hash, &request.critical_hash)
@@ -364,7 +361,7 @@ impl BMMCache {
 #[derive(Debug)]
 struct BMMRequest {
     txid: Txid,
-    critical_hash: Uint256,
+    critical_hash: TxMerkleNode,
     side_block_data: Vec<u8>,
 }
 
