@@ -96,9 +96,15 @@ impl Deposit {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DepositOutput {
-    pub index: usize,
     pub address: String,
     pub amount: Amount,
+    pub index: usize,
+}
+
+#[derive(Debug)]
+pub struct Output {
+    pub address: String,
+    pub amount: u64,
 }

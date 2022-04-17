@@ -103,7 +103,6 @@ impl DrivechainClient {
         height: usize,
         amount: Amount,
     ) -> Txid {
-        println!("send_bmm_request");
         let str_hash_prev = prev_main_block_hash.to_string();
         let params = vec![
             json!(amount.to_string_in(Denomination::Bitcoin)),

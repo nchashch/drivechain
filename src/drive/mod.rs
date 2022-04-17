@@ -1,7 +1,7 @@
 mod client;
-mod db;
-mod deposit;
 mod coinbase_data;
+mod db;
+pub mod deposit;
 pub mod withdrawal;
 use bitcoin::blockdata::{
     opcodes, script,
@@ -13,12 +13,12 @@ use bitcoin::util::address::Address;
 use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
+pub use coinbase_data::CoinbaseData;
 pub use db::BlockData;
 pub use deposit::{Deposit, DepositOutput};
 use std::collections::HashMap;
 use std::str::FromStr;
 pub use withdrawal::WithdrawalOutput;
-pub use coinbase_data::{CoinbaseData};
 
 #[derive(Debug)]
 pub struct Block {
@@ -66,15 +66,17 @@ impl Drivechain {
         }
     }
 
-    pub fn get_coinbase_data(&self) -> CoinbaseData {
-        let mainchain_tip_hash = self
+    pub fn get_coinbase_data(&self, prev_side_block_hash: BlockHash) -> CoinbaseData {
+        let prev_main_block_hash = self
             .client
             .get_mainchain_tip()
             .expect("failed to get mainchain tip");
-        CoinbaseData {
-            prev_main_block_hash: mainchain_tip_hash,
-            deposits: None,
-        }
+        let coinbase_data = CoinbaseData {
+            prev_main_block_hash,
+            prev_side_block_hash,
+        };
+        let bytes = coinbase_data.serialize();
+        coinbase_data
     }
 
     // Attempts to blind merge mine a block.
@@ -83,22 +85,15 @@ impl Drivechain {
         critical_hash: &TxMerkleNode,
         block_data: &Vec<u8>,
         amount: Amount,
-    ) -> Option<Block> {
+    ) {
         let mainchain_tip_hash = self
             .client
             .get_mainchain_tip()
             .expect("failed to get mainchain tip");
-        // let mainchain_tip_hash = coinbase_data.prev_main_block_hash;
-        // Check if any bmm request was accepted.
-        if let Some(block) = self.confirm_bmm(&mainchain_tip_hash) {
-            // Return block data if it was.
-            return Some(block);
-        }
-        // If there are no accepted bmm requests create another one
+        // Create a BMM request.
         let txid = self
             .client
             .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount);
-        dbg!(txid);
         let bmm_request = BMMRequest {
             txid: txid,
             critical_hash: *critical_hash,
@@ -106,19 +101,22 @@ impl Drivechain {
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
-        None
     }
 
     // Check if any bmm request was accepted.
-    fn confirm_bmm(&mut self, mainchain_tip_hash: &BlockHash) -> Option<Block> {
-        if self.bmm_cache.prev_main_block_hash == *mainchain_tip_hash {
+    pub fn confirm_bmm(&mut self) -> Option<Block> {
+        let mainchain_tip_hash = self
+            .client
+            .get_mainchain_tip()
+            .expect("failed to get mainchain tip");
+        if self.bmm_cache.prev_main_block_hash == mainchain_tip_hash {
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
             return None;
         }
         // Mainchain tip has changed so all requests for previous tip are now
         // invalid hence we update our prev_main_block_hash
-        self.bmm_cache.prev_main_block_hash = *mainchain_tip_hash;
+        self.bmm_cache.prev_main_block_hash = mainchain_tip_hash;
         // and delete all requests with drain method.
         for request in self.bmm_cache.requests.drain(..) {
             // We check if our request was included in a mainchain block.
@@ -192,28 +190,18 @@ impl Drivechain {
         }
     }
 
-    pub fn deposit_outputs(&self, last_index: usize) -> Vec<DepositOutput> {
-        let mut deposit_outputs = vec![];
-        for item in self.db.deposits_since(last_index) {
-            let (index, deposit) = item.clone();
-            let prev_deposit = match index {
-                0 => None,
-                _ => self.db.get_deposit(index - 1),
-            };
-            let prev_amount = prev_deposit
-                .as_ref()
-                .map_or(Amount::from_sat(0), |dep| dep.amount());
-            if deposit.amount() < prev_amount {
-                continue;
-            }
-            let deposit_output = DepositOutput {
-                index: index,
-                address: deposit.strdest.clone(),
-                amount: deposit.amount() - prev_amount,
-            };
-            deposit_outputs.push(deposit_output);
-        }
-        deposit_outputs
+    pub fn deposit_outputs_range(
+        &self,
+        first_index: usize,
+        last_index: usize,
+    ) -> Vec<DepositOutput> {
+        let deposits = self.db.deposits_range(first_index, last_index);
+        self.db.collect_deposits(deposits.into_iter())
+    }
+
+    pub fn deposit_outputs_since(&self, index: usize) -> Vec<DepositOutput> {
+        let deposits = self.db.deposits_since(index);
+        self.db.collect_deposits(deposits.into_iter())
     }
 
     pub fn collect_wt_bundles(&self) -> Vec<Transaction> {

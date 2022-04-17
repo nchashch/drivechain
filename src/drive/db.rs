@@ -1,18 +1,20 @@
-use super::deposit::Deposit;
+use super::deposit::{Deposit, DepositOutput, Output};
 use super::withdrawal;
 use super::withdrawal::WithdrawalOutput;
-use bincode;
 use bitcoin::blockdata::transaction::OutPoint;
+use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
-use sled;
 use sled::transaction::ConflictableTransactionError;
 use sled::Transactional;
-use std;
 use std::collections::{HashMap, HashSet};
 
+// (balanced|unbalanced)str dest -> (side amount, main amount)
+
 const DEPOSITS: &[u8] = b"deposits";
+const DEPOSIT_INDICES: &[u8] = b"deposit_indices";
+const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
+const UNBALANCED_DEPOSITS: &[u8] = b"unbalanced_deposits";
 const WITHDRAWALS: &[u8] = b"withdrawals";
-// TODO: Rename to WTID_TO_STATUS
 const WTID_TO_STATUS: &[u8] = b"wtid_to_status";
 // TODO: Remove this one, it is unnecessary.
 const UNSPENT_WITHDRAWALS: &[u8] = b"unspent_withdrawals";
@@ -21,6 +23,9 @@ const BLOCK_HEIGHT_TO_WTIDS: &[u8] = b"block_height_to_wtids";
 pub struct DB {
     pub db: sled::Db,
     deposits: sled::Tree,
+    deposit_indices: sled::Tree,
+    deposit_balances: sled::Tree,
+    unbalanced_deposits: sled::Tree,
     withdrawals: sled::Tree,
     unspent_withdrawals: sled::Tree,
     wtid_to_status: sled::Tree,
@@ -44,6 +49,18 @@ impl DB {
         let deposits = db
             .open_tree(DEPOSITS)
             .expect("couldn't open deposits key value store");
+        let deposit_indices = db
+            .open_tree(DEPOSIT_INDICES)
+            .expect("couldn't open deposit indices key value store");
+
+        let deposit_balances = db
+            .open_tree(DEPOSIT_BALANCES)
+            .expect("couldn't open deposit balances key value store");
+
+        let unbalanced_deposits = db
+            .open_tree(UNBALANCED_DEPOSITS)
+            .expect("couldn't open unbalanced deposits key value store");
+
         let withdrawals = db
             .open_tree(WITHDRAWALS)
             .expect("couldn't open withdrawals key value store");
@@ -57,12 +74,132 @@ impl DB {
             .open_tree(BLOCK_HEIGHT_TO_WTIDS)
             .expect("couldn't open block number to wtids key value store");
         DB {
-            db: db,
-            deposits: deposits,
-            withdrawals: withdrawals,
-            wtid_to_status: wtid_to_status,
-            unspent_withdrawals: unspent_withdrawals,
-            block_height_to_wtids: block_height_to_wtids,
+            db,
+            deposits,
+            deposit_indices,
+            deposit_balances,
+            unbalanced_deposits,
+            withdrawals,
+            wtid_to_status,
+            unspent_withdrawals,
+            block_height_to_wtids,
+        }
+    }
+
+    fn aggregate_outputs(outputs_vec: impl Iterator<Item = Output>) -> HashMap<String, u64> {
+        let mut outputs = HashMap::<String, u64>::new();
+        for output in outputs_vec {
+            let amount = outputs.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
+        }
+        outputs
+    }
+
+    pub fn get_deposit_outputs(&self) -> Vec<Output> {
+        self.unbalanced_deposits
+            .iter()
+            .map(|address| {
+                let (address, _) = address.expect("failed to get unbalanced deposit address");
+                let balance = self
+                    .deposit_balances
+                    .get(&address)
+                    .expect("failed to get balance")
+                    .expect("unbalanced output doesn't exist");
+                let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
+                    .expect("failed to deserialize deposit balance");
+                Output {
+                    address: String::from_utf8(address.to_vec())
+                        .expect("failed to decode address string"),
+                    amount: main_balance - side_balance,
+                }
+            })
+            .collect()
+    }
+
+    pub fn connect_side_outputs(
+        &mut self,
+        outputs: impl Iterator<Item = Output>,
+        just_check: bool,
+    ) -> bool {
+        let side_balances = DB::aggregate_outputs(outputs);
+        for (address, side_delta) in side_balances {
+            if let Some(balance) = self
+                .deposit_balances
+                .get(address.as_bytes())
+                .expect("failed to get deposit balance")
+            {
+                let (old_side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
+                    .expect("failed to deserialize deposit balance");
+                let new_side_balance = old_side_balance + side_delta;
+                if new_side_balance != main_balance {
+                    return false;
+                }
+                // TODO: Use a transaction here
+                if !just_check {
+                    let new_balance = (new_side_balance, main_balance);
+                    let new_balance = bincode::serialize(&new_balance)
+                        .expect("failed to serialize new deposit balance");
+                    self.deposit_balances
+                        .insert(address.as_bytes(), new_balance)
+                        .expect("failed to update deposit balances");
+                    self.unbalanced_deposits
+                        .remove(address.as_bytes())
+                        .expect("failed to remove unbalanced tag from deposit");
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn disconnect_side_outputs(&mut self, outputs: &[Output], just_check: bool) -> bool {
+        false
+    }
+
+    pub fn add_deposit_index(&mut self, index: usize) {
+        let index = (index as u32).to_be_bytes();
+        self.deposit_indices
+            .insert(index, &[])
+            .expect("couldn't insert deposit index");
+    }
+
+    pub fn remove_deposit_index(&mut self, index: usize) {
+        let (last_index, _) = self
+            .deposit_indices
+            .last()
+            .expect("couldn't get last index")
+            .expect("deposit indices key value store is empty");
+        let last_index = BigEndian::read_u32(&last_index);
+        if last_index == (index as u32) {
+            self.deposit_indices
+                .pop_max()
+                .expect("failed to remove deposit index");
+        } else {
+            panic!("can't delete deposit index that is not last")
+        }
+    }
+
+    pub fn get_deposit_range(&self, index: usize) -> Option<(usize, usize)> {
+        let index_u32 = (index as u32).to_be_bytes();
+        if self
+            .deposit_indices
+            .get(index_u32)
+            .expect("failed to get deposit index")
+            .is_none()
+        {
+            return None;
+        }
+        match self
+            .deposit_indices
+            .get_lt(index_u32)
+            .expect("failed to get previous index")
+        {
+            Some((prev_index, _)) => {
+                let prev_index = BigEndian::read_u32(&prev_index);
+                Some((prev_index as usize, index))
+            }
+            None => None,
         }
     }
 
@@ -280,16 +417,53 @@ impl DB {
                 Some(last_deposit) => !last_deposit.is_spent_by(deposit),
                 None => false,
             });
+        let mut index_to_deposit = HashMap::<usize, Deposit>::new();
         for deposit in deposit_iter {
             deposits_batch.insert(
                 &(index as u32).to_be_bytes(),
                 bincode::serialize(&deposit).expect("failed to serialize deposit"),
             );
+            index_to_deposit.insert(index, deposit.clone());
             index += 1;
         }
         self.deposits
             .apply_batch(deposits_batch)
             .expect("failed to update deposits");
+
+        // TODO: use a transaction to make this atomic
+        let balances = self.collect_main_outputs(index_to_deposit.into_iter());
+
+        for (address, main_amount) in balances.iter() {
+            let balance = self
+                .deposit_balances
+                .get(address.as_bytes())
+                .expect("failed to get deposit balance")
+                .map(|balance| {
+                    bincode::deserialize::<(u64, u64)>(&balance)
+                        .expect("failed to deserialize balance")
+                });
+            let balance = match balance {
+                Some(balance) => {
+                    let balance = (balance.0, balance.1 + main_amount.as_sat());
+                    bincode::serialize(&balance).expect("failed to serialize balance")
+                }
+                None => {
+                    let balance = (0 as u64, main_amount.as_sat());
+                    bincode::serialize(&balance).expect("failed to serialize balance")
+                }
+            };
+            self.deposit_balances
+                .insert(address.as_bytes(), balance)
+                .expect("failed to update deposit balance");
+            self.unbalanced_deposits
+                .insert(address.as_bytes(), &[])
+                .expect("failed to tag unbalanced deposit");
+        }
+        for item in self.deposit_balances.iter() {
+            let (address, balance) = item.unwrap();
+            let address = String::from_utf8(address[1..].to_vec()).unwrap();
+            let balance = bincode::deserialize::<(u64, u64)>(&balance).unwrap();
+        }
     }
 
     pub fn sort_deposits(deposits: &[Deposit]) -> Vec<Deposit> {
@@ -433,6 +607,58 @@ impl DB {
             })
             .collect();
         withdrawals
+    }
+
+    pub fn collect_main_outputs(
+        &self,
+        deposits: impl Iterator<Item = (usize, Deposit)>,
+    ) -> HashMap<String, Amount> {
+        let mut balances = HashMap::<String, Amount>::new();
+        for item in deposits {
+            let (index, deposit) = item.clone();
+            let prev_deposit = match index {
+                0 => None,
+                _ => self.get_deposit(index - 1),
+            };
+            let prev_amount = prev_deposit
+                .as_ref()
+                .map_or(Amount::from_sat(0), |dep| dep.amount());
+            if deposit.amount() < prev_amount {
+                continue;
+            }
+            let balance = balances
+                .entry(deposit.strdest.clone())
+                .or_insert(Amount::ZERO);
+            *balance += deposit.amount() - prev_amount;
+        }
+        balances
+    }
+
+    pub fn collect_deposits(
+        &self,
+        deposits: impl Iterator<Item = (usize, Deposit)>,
+    ) -> Vec<DepositOutput> {
+        let mut deposit_outputs = vec![];
+        for item in deposits {
+            let (index, deposit) = item.clone();
+            let prev_deposit = match index {
+                0 => None,
+                _ => self.get_deposit(index - 1),
+            };
+            let prev_amount = prev_deposit
+                .as_ref()
+                .map_or(Amount::from_sat(0), |dep| dep.amount());
+            if deposit.amount() < prev_amount {
+                continue;
+            }
+            let deposit_output = DepositOutput {
+                index,
+                address: deposit.strdest.clone(),
+                amount: deposit.amount() - prev_amount,
+            };
+            deposit_outputs.push(deposit_output);
+        }
+        deposit_outputs
     }
 }
 
