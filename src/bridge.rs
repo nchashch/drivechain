@@ -2,7 +2,6 @@ use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
 use bitcoin::util::amount::Amount;
-use byteorder::{BigEndian, ByteOrder};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -42,23 +41,8 @@ mod ffi {
             coinbase_data: &str,
         ) -> bool;
         fn get_deposit_outputs(&self) -> Vec<Output>;
-        fn verify_deposit_outputs(
-            &self,
-            first_index: u32,
-            last_index: u32,
-            outputs: &Vec<Output>,
-        ) -> bool;
-        fn to_be_bytes(index: u32) -> Vec<u8>;
-        fn from_be_bytes(bytes: Vec<u8>) -> u32;
+        fn format_deposit_address(&self, address: &str) -> String;
     }
-}
-
-fn to_be_bytes(index: u32) -> Vec<u8> {
-    index.to_be_bytes().to_vec()
-}
-
-fn from_be_bytes(bytes: Vec<u8>) -> u32 {
-    BigEndian::read_u32(&bytes)
 }
 
 pub struct Drivechain(drive::Drivechain);
@@ -161,39 +145,8 @@ impl Drivechain {
         self.0.db.connect_side_outputs(outputs, just_check)
     }
 
-    fn verify_deposit_outputs(
-        &self,
-        first_index: u32,
-        last_index: u32,
-        outputs: &Vec<ffi::Output>,
-    ) -> bool {
-        let deposits = self
-            .0
-            .deposit_outputs_range(first_index as usize, last_index as usize);
-        let deposits = aggregate_deposits(deposits.iter());
-        let outputs = aggregate_outputs(outputs.iter());
-        if deposits.len() != outputs.len() {
-            return false;
-        }
-        for (address, deposit) in deposits.iter() {
-            if let Some(amount) = outputs.get(address) {
-                if deposit.amount != outputs[address] {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        for (address, amount) in outputs {
-            if let Some(deposit) = deposits.get(&address) {
-                if deposit.amount != amount {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        true
+    fn format_deposit_address(&self, address: &str) -> String {
+        self.0.format_deposit_address(address)
     }
 }
 
@@ -206,23 +159,6 @@ fn aggregate_outputs<'a>(
             .entry(output.address.clone())
             .or_insert(Amount::ZERO);
         *amount += Amount::from_sat(output.amount);
-    }
-    outputs
-}
-
-fn aggregate_deposits<'a>(
-    deposits: impl Iterator<Item = &'a drive::DepositOutput>,
-) -> HashMap<String, drive::DepositOutput> {
-    let mut outputs = HashMap::<String, drive::DepositOutput>::new();
-    for deposit in deposits {
-        if let Some(output) = outputs.get_mut(&deposit.address) {
-            output.amount += deposit.amount;
-            if output.index < deposit.index {
-                output.index = deposit.index;
-            }
-        } else {
-            outputs.insert(deposit.address.clone(), deposit.clone());
-        }
     }
     outputs
 }

@@ -1,4 +1,4 @@
-use super::deposit::{Deposit, DepositOutput, Output};
+use super::deposit::{Deposit, Output};
 use super::withdrawal;
 use super::withdrawal::WithdrawalOutput;
 use bitcoin::blockdata::transaction::OutPoint;
@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 // (balanced|unbalanced)str dest -> (side amount, main amount)
 
 const DEPOSITS: &[u8] = b"deposits";
-const DEPOSIT_INDICES: &[u8] = b"deposit_indices";
 const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
 const UNBALANCED_DEPOSITS: &[u8] = b"unbalanced_deposits";
 const WITHDRAWALS: &[u8] = b"withdrawals";
@@ -23,7 +22,6 @@ const BLOCK_HEIGHT_TO_WTIDS: &[u8] = b"block_height_to_wtids";
 pub struct DB {
     pub db: sled::Db,
     deposits: sled::Tree,
-    deposit_indices: sled::Tree,
     deposit_balances: sled::Tree,
     unbalanced_deposits: sled::Tree,
     withdrawals: sled::Tree,
@@ -49,9 +47,6 @@ impl DB {
         let deposits = db
             .open_tree(DEPOSITS)
             .expect("couldn't open deposits key value store");
-        let deposit_indices = db
-            .open_tree(DEPOSIT_INDICES)
-            .expect("couldn't open deposit indices key value store");
 
         let deposit_balances = db
             .open_tree(DEPOSIT_BALANCES)
@@ -76,7 +71,6 @@ impl DB {
         DB {
             db,
             deposits,
-            deposit_indices,
             deposit_balances,
             unbalanced_deposits,
             withdrawals,
@@ -84,15 +78,6 @@ impl DB {
             unspent_withdrawals,
             block_height_to_wtids,
         }
-    }
-
-    fn aggregate_outputs(outputs_vec: impl Iterator<Item = Output>) -> HashMap<String, u64> {
-        let mut outputs = HashMap::<String, u64>::new();
-        for output in outputs_vec {
-            let amount = outputs.entry(output.address.clone()).or_insert(0);
-            *amount += output.amount;
-        }
-        outputs
     }
 
     pub fn get_deposit_outputs(&self) -> Vec<Output> {
@@ -121,353 +106,130 @@ impl DB {
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
     ) -> bool {
-        let side_balances = DB::aggregate_outputs(outputs);
-        for (address, side_delta) in side_balances {
-            if let Some(balance) = self
-                .deposit_balances
-                .get(address.as_bytes())
-                .expect("failed to get deposit balance")
-            {
-                let (old_side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
-                    .expect("failed to deserialize deposit balance");
-                let new_side_balance = old_side_balance + side_delta;
-                if new_side_balance != main_balance {
-                    return false;
-                }
-                // TODO: Use a transaction here
-                if !just_check {
-                    let new_balance = (new_side_balance, main_balance);
-                    let new_balance = bincode::serialize(&new_balance)
-                        .expect("failed to serialize new deposit balance");
-                    self.deposit_balances
-                        .insert(address.as_bytes(), new_balance)
-                        .expect("failed to update deposit balances");
-                    self.unbalanced_deposits
-                        .remove(address.as_bytes())
-                        .expect("failed to remove unbalanced tag from deposit");
-                }
-            } else {
-                return false;
-            }
+        let mut side_balances = HashMap::<String, u64>::new();
+        for output in outputs {
+            let amount = side_balances.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
         }
-        true
+        (&self.deposit_balances, &self.unbalanced_deposits)
+            .transaction(|(deposit_balances, unbalanced_deposits)| -> sled::transaction::ConflictableTransactionResult<bool, bincode::Error> {
+                for (address, side_delta) in side_balances.iter() {
+                    if let Some(balance) = deposit_balances.get(address.as_bytes())? {
+                        let (old_side_balance, main_balance) =
+                            bincode::deserialize::<(u64, u64)>(&balance).map_err(ConflictableTransactionError::Abort)?;
+                        let new_side_balance = old_side_balance + side_delta;
+                        if new_side_balance != main_balance {
+                            return Ok(false);
+                        }
+                        if !just_check {
+                            let new_balance = (new_side_balance, main_balance);
+                            let new_balance = bincode::serialize(&new_balance).map_err(ConflictableTransactionError::Abort)?;
+                            deposit_balances
+                                .insert(address.as_bytes(), new_balance)?;
+                            unbalanced_deposits.remove(address.as_bytes())?;
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })
+            .unwrap()
     }
 
     pub fn disconnect_side_outputs(&mut self, outputs: &[Output], just_check: bool) -> bool {
         false
     }
 
-    pub fn add_deposit_index(&mut self, index: usize) {
-        let index = (index as u32).to_be_bytes();
-        self.deposit_indices
-            .insert(index, &[])
-            .expect("couldn't insert deposit index");
-    }
-
-    pub fn remove_deposit_index(&mut self, index: usize) {
-        let (last_index, _) = self
-            .deposit_indices
-            .last()
-            .expect("couldn't get last index")
-            .expect("deposit indices key value store is empty");
-        let last_index = BigEndian::read_u32(&last_index);
-        if last_index == (index as u32) {
-            self.deposit_indices
-                .pop_max()
-                .expect("failed to remove deposit index");
-        } else {
-            panic!("can't delete deposit index that is not last")
-        }
-    }
-
-    pub fn get_deposit_range(&self, index: usize) -> Option<(usize, usize)> {
-        let index_u32 = (index as u32).to_be_bytes();
-        if self
-            .deposit_indices
-            .get(index_u32)
-            .expect("failed to get deposit index")
-            .is_none()
-        {
-            return None;
-        }
-        match self
-            .deposit_indices
-            .get_lt(index_u32)
-            .expect("failed to get previous index")
-        {
-            Some((prev_index, _)) => {
-                let prev_index = BigEndian::read_u32(&prev_index);
-                Some((prev_index as usize, index))
-            }
-            None => None,
-        }
-    }
-
-    pub fn set_bundle_withdrawal_status(
-        &mut self,
-        bundle: &bitcoin::Transaction,
-        status: withdrawal::Status,
-    ) {
-        let mut amounts = HashMap::<bitcoin::Address, (u64, Vec<[u8; 32]>)>::new();
-        let mut prev_address: Option<bitcoin::Address> = None;
-        for out in bundle.output.iter() {
-            let address = bitcoin::Address::from_script(
-                &out.script_pubkey,
-                bitcoin::network::constants::Network::Regtest,
-            );
-            if let Some(ref address) = address {
-                let (amount, wtids) = amounts.entry(address.clone()).or_insert((0, vec![]));
-                *amount += out.value;
-                prev_address = Some(address.clone());
-            }
-            if out.script_pubkey.is_op_return() {
-                for instruction in out.script_pubkey.instructions() {
-                    if let Ok(bitcoin::blockdata::script::Instruction::PushBytes(bytes)) =
-                        instruction
-                    {
-                        if bytes.len() == 32 {
-                            if let Some(ref address) = prev_address {
-                                let (_, wtids) = amounts.get_mut(&address).unwrap();
-                                wtids.push(bytes.try_into().unwrap());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for (address, (paid_out, wtids)) in amounts {
-            // let mut burned = 0;
-            // for wtid in wtids.iter() {
-            //     burned += self.get_withdrawal(*wtid).unwrap().amount;
-            // }
-            // if paid_out != burned {
-            //     continue;
-            // }
-            for wtid in wtids.iter() {
-                self.set_withdrawal_status(*wtid, status)
-                    .expect("withdrawal doesn't exist");
-            }
-        }
-    }
-
-    pub fn add_withdrawal(
-        &mut self,
-        wtid: [u8; 32],
-        withdrawal: &Vec<WithdrawalOutput>,
-    ) -> Result<(), withdrawal::Error> {
-        self.check_withdrawal(wtid);
-        // Can't add a withdrawal if one with the same wtid already exists.
-        if self.contains_withdrawal(wtid) {
-            return Err(withdrawal::Error::WithdrawalAlreadyExists);
-        }
-        let withdrawal = bincode::serialize(&withdrawal).expect("failed to serialize withdrawal");
-        let status = bincode::serialize(&withdrawal::Status::Unspent)
-            .expect("failed to serialize withdrawal status");
-        (&self.withdrawals, &self.wtid_to_status, &self.unspent_withdrawals)
-            .transaction(|(withdrawals, wtid_to_status, unspent_withdrawals)| -> sled::transaction::ConflictableTransactionResult<_, sled::Error> {
-                withdrawals.insert(&wtid, withdrawal.clone())?;
-                wtid_to_status.insert(&wtid, status.clone())?;
-                unspent_withdrawals.insert(&wtid, &[])?;
-                Ok(())
-            }).expect("failed to add a withdrawal");
-        Ok(())
-    }
-
-    fn contains_withdrawal(&self, wtid: [u8; 32]) -> bool {
-        self.withdrawals
-            .contains_key(wtid)
-            .expect("failed to check if withdrawal exists")
-    }
-
-    // Check db consistency for wtid, and panic if db is inconsistent.
-    fn check_withdrawal(&self, wtid: [u8; 32]) {
-        let wt_exists = self
-            .withdrawals
-            .contains_key(wtid)
-            .expect("failed to check if withdrawal exists");
-        let wt_status_exists = self
-            .wtid_to_status
-            .contains_key(wtid)
-            .expect("failed to check if withdrawal status exists");
-        if wt_exists && !wt_status_exists {
-            panic!("withdrawal exists but withdrawal status doesn't");
-        } else if wt_status_exists && !wt_exists {
-            panic!("withdrawal status exists but withdrawal doesn't");
-        }
-        let status = self
-            .wtid_to_status
-            .get(wtid)
-            .expect("failed to get withdrawal status")
-            .map(|s| bincode::deserialize(&s).expect("failed to deserialize withdrawal status"));
-        let unspent_wt_exists = self
-            .unspent_withdrawals
-            .contains_key(wtid)
-            .expect("failed to check if wtid is in unspent withdrawals");
-        if status == Some(withdrawal::Status::Unspent) && !unspent_wt_exists {
-            panic!("withdrawal is unspent but it is not in unspent withdrawals key value store");
-        }
-        if status != Some(withdrawal::Status::Unspent) && unspent_wt_exists {
-            panic!("withdrawal is not unspent but it is in unspent withdrawals key value store");
-        }
-    }
-
-    pub fn set_withdrawal_status(
-        &mut self,
-        wtid: [u8; 32],
-        status: withdrawal::Status,
-    ) -> Result<(), withdrawal::Error> {
-        self.check_withdrawal(wtid);
-        // Can only update status of an already existing withdrawal.
-        if !self.contains_withdrawal(wtid) {
-            return Err(withdrawal::Error::WithdrawalDoesntExist);
-        }
-        (&self.wtid_to_status, &self.unspent_withdrawals)
-            .transaction(|(wtid_to_status, unspent_withdrawals)| -> sled::transaction::ConflictableTransactionResult<_, sled::Error> {
-                match status {
-                    withdrawal::Status::Unspent => {
-                        unspent_withdrawals.insert(&wtid, &[])?
-                    },
-                    _ => {
-                        unspent_withdrawals.remove(&wtid)?
-                    },
-                };
-                let status_bin = bincode::serialize(&status).expect("failed to serialize withdrawal status");
-                wtid_to_status.insert(&wtid, status_bin.clone())?;
-                Ok(())
-            })
-            .expect("failed to update withdrawal status");
-        Ok(())
-    }
-
-    pub fn get_withdrawal(&self, wtid: [u8; 32]) -> Option<Vec<WithdrawalOutput>> {
-        self.withdrawals
-            .get(wtid)
-            .expect("failed to get withdrawal")
-            .map(|withdrawal| {
-                bincode::deserialize::<Vec<WithdrawalOutput>>(withdrawal.as_ref())
-                    .expect("failed to deserialize withdrawal")
-            })
-    }
-
-    pub fn get_withdrawal_status(&self, wtid: [u8; 32]) -> Option<withdrawal::Status> {
-        self.wtid_to_status
-            .get(wtid)
-            .expect("failed to get withdrawal status")
-            .map(|withdrawal_status| {
-                bincode::deserialize(withdrawal_status.as_ref())
-                    .expect("failed to deserialize withdrawal status")
-            })
-    }
-
-    pub fn get_deposit(&self, index: usize) -> Option<Deposit> {
-        let index: [u8; 4] = (index as u32).to_be_bytes();
-        self.deposits
-            .get(index)
-            .expect("failed to get deposit")
-            .map(|deposit| {
-                bincode::deserialize(deposit.as_ref()).expect("failed to deserialize deposit")
-            })
-    }
-
-    pub fn deposits_range(&self, start: usize, end: usize) -> Vec<(usize, Deposit)> {
-        let start: [u8; 4] = (start as u32).to_be_bytes();
-        let end: [u8; 4] = (end as u32).to_be_bytes();
-        self.deposits
-            .range(start..=end)
-            .map(|item| {
-                let (index, deposit) = item.expect("failed to get deposit range");
-                (
-                    BigEndian::read_u32(index.as_ref()) as usize,
-                    bincode::deserialize::<Deposit>(deposit.as_ref())
-                        .expect("failed to deserialize deposit"),
-                )
-            })
-            .collect()
-    }
-
-    pub fn deposits_since(&self, start: usize) -> Vec<(usize, Deposit)> {
-        let start: [u8; 4] = (start as u32).to_be_bytes();
-        self.deposits
-            .range(start..)
-            .map(|item| {
-                let (index, deposit) = item.expect("failed to get deposit range");
-                (
-                    BigEndian::read_u32(index.as_ref()) as usize,
-                    bincode::deserialize::<Deposit>(deposit.as_ref())
-                        .expect("failed to deserialize deposit"),
-                )
-            })
-            .collect()
-    }
-
     pub fn update_deposits(&self, deposits: &[Deposit]) {
+        // New deposits are sorted in CTIP order.
         let sorted_deposits = DB::sort_deposits(deposits);
+        // We get the last deposit stored in the db.
         let (last_index, last_deposit) = match self.get_last_deposit() {
             Some((last_index, last_deposit)) => (Some(last_index), Some(last_deposit)),
             None => (None, None),
         };
-        let mut index = match last_index {
+        // We get the starting index for new deposits, it is either:
+        let start_index = match last_index {
+            // one after the last index
             Some(last_index) => last_index + 1,
+            // or if there are no deposits in db it is 0.
             None => 0,
         };
+        // We get an index -> deposit HashMap, by zipping a sequence of indices
+        // starting at start_index with deposits not in the database.
+        let index_to_deposit: HashMap<usize, Deposit> = (start_index..)
+            .zip(
+                sorted_deposits
+                    .into_iter()
+                    // We skip new deposits until we find one that "spends" the
+                    // last deposit, this way we skip all deposits that are
+                    // already in the db.
+                    //
+                    // The deposit that spends last_deposit comes right after
+                    // last_deposit, so it's index = start_index.
+                    //
+                    // If there are no new deposits that spend last_deposit then
+                    // all deposits will be skipped and we will get an empty
+                    // HashMap.
+                    .skip_while(|deposit| match &last_deposit {
+                        Some(last_deposit) => !last_deposit.is_spent_by(deposit),
+                        // If there are no deposits in db we don't skip any
+                        // deposits.
+                        None => false,
+                    }),
+            )
+            .collect();
+        let mut balances = HashMap::<String, Amount>::new();
+        let mut prev_deposit = last_deposit;
         let mut deposits_batch = sled::Batch::default();
-        let deposit_iter = sorted_deposits
-            .iter()
-            .skip_while(|deposit| match &last_deposit {
-                Some(last_deposit) => !last_deposit.is_spent_by(deposit),
-                None => false,
-            });
-        let mut index_to_deposit = HashMap::<usize, Deposit>::new();
-        for deposit in deposit_iter {
+        for (index, deposit) in index_to_deposit {
             deposits_batch.insert(
                 &(index as u32).to_be_bytes(),
                 bincode::serialize(&deposit).expect("failed to serialize deposit"),
             );
-            index_to_deposit.insert(index, deposit.clone());
-            index += 1;
+            let prev_amount = prev_deposit.as_ref().map(|deposit| deposit.amount());
+            let prev_amount = prev_amount.unwrap_or(Amount::ZERO);
+            if deposit.amount() < prev_amount {
+                continue;
+            }
+            let balance = balances
+                .entry(deposit.strdest.clone())
+                .or_insert(Amount::ZERO);
+            *balance += deposit.amount() - prev_amount;
+            prev_deposit = Some(deposit);
         }
-        self.deposits
-            .apply_batch(deposits_batch)
-            .expect("failed to update deposits");
 
-        // TODO: use a transaction to make this atomic
-        let balances = self.collect_main_outputs(index_to_deposit.into_iter());
+        (
+            &self.deposits,
+            &self.deposit_balances,
+            &self.unbalanced_deposits,
+        )
+            .transaction(|(deposits, deposit_balances, unbalanced_deposits)| -> sled::transaction::ConflictableTransactionResult<(), bincode::Error> {
+                deposits.apply_batch(&deposits_batch)?;
 
-        for (address, main_amount) in balances.iter() {
-            let balance = self
-                .deposit_balances
-                .get(address.as_bytes())
-                .expect("failed to get deposit balance")
-                .map(|balance| {
-                    bincode::deserialize::<(u64, u64)>(&balance)
-                        .expect("failed to deserialize balance")
-                });
-            let balance = match balance {
-                Some(balance) => {
-                    let balance = (balance.0, balance.1 + main_amount.as_sat());
-                    bincode::serialize(&balance).expect("failed to serialize balance")
+                for (address, main_amount) in balances.iter() {
+                    let balance = deposit_balances
+                        .get(address.as_bytes())?;
+                    let balance = match balance {
+                        Some(balance) => Some(bincode::deserialize::<(u64, u64)>(&balance).map_err(ConflictableTransactionError::Abort)?),
+                        None => None,
+                    };
+                    let balance = match balance {
+                        Some(balance) => (balance.0, balance.1 + main_amount.as_sat()),
+                        None => (0, main_amount.as_sat()),
+                    };
+                    let balance = bincode::serialize(&balance).map_err(ConflictableTransactionError::Abort)?;
+                    deposit_balances.insert(address.as_bytes(), balance)?;
+                    unbalanced_deposits.insert(address.as_bytes(), &[])?;
                 }
-                None => {
-                    let balance = (0 as u64, main_amount.as_sat());
-                    bincode::serialize(&balance).expect("failed to serialize balance")
-                }
-            };
-            self.deposit_balances
-                .insert(address.as_bytes(), balance)
-                .expect("failed to update deposit balance");
-            self.unbalanced_deposits
-                .insert(address.as_bytes(), &[])
-                .expect("failed to tag unbalanced deposit");
-        }
-        for item in self.deposit_balances.iter() {
-            let (address, balance) = item.unwrap();
-            let address = String::from_utf8(address[1..].to_vec()).unwrap();
-            let balance = bincode::deserialize::<(u64, u64)>(&balance).unwrap();
-        }
+                Ok(())
+            })
+            .unwrap();
     }
 
     pub fn sort_deposits(deposits: &[Deposit]) -> Vec<Deposit> {
-        if deposits.len() == 0 {
+        if deposits.is_empty() {
             return vec![];
         }
         let mut outpoint_to_deposit = HashMap::<OutPoint, Deposit>::new();
@@ -486,7 +248,7 @@ impl DB {
                 .collect::<Vec<OutPoint>>();
             if input_outpoints.len() == 1 {
                 spent_by.insert(input_outpoints[0], deposit.outpoint());
-            } else if input_outpoints.len() == 0 {
+            } else if input_outpoints.is_empty() {
                 first_outpoint = Some(deposit.outpoint());
             } else {
                 panic!("Invalid deposit transaction - input spends more than one previous CTIP");
@@ -609,56 +371,160 @@ impl DB {
         withdrawals
     }
 
-    pub fn collect_main_outputs(
-        &self,
-        deposits: impl Iterator<Item = (usize, Deposit)>,
-    ) -> HashMap<String, Amount> {
-        let mut balances = HashMap::<String, Amount>::new();
-        for item in deposits {
-            let (index, deposit) = item.clone();
-            let prev_deposit = match index {
-                0 => None,
-                _ => self.get_deposit(index - 1),
-            };
-            let prev_amount = prev_deposit
-                .as_ref()
-                .map_or(Amount::from_sat(0), |dep| dep.amount());
-            if deposit.amount() < prev_amount {
-                continue;
+    pub fn set_bundle_withdrawal_status(
+        &mut self,
+        bundle: &bitcoin::Transaction,
+        status: withdrawal::Status,
+    ) {
+        let mut amounts = HashMap::<bitcoin::Address, (u64, Vec<[u8; 32]>)>::new();
+        let mut prev_address: Option<bitcoin::Address> = None;
+        for out in bundle.output.iter() {
+            let address = bitcoin::Address::from_script(
+                &out.script_pubkey,
+                bitcoin::network::constants::Network::Regtest,
+            );
+            if let Some(ref address) = address {
+                let (amount, wtids) = amounts.entry(address.clone()).or_insert((0, vec![]));
+                *amount += out.value;
+                prev_address = Some(address.clone());
             }
-            let balance = balances
-                .entry(deposit.strdest.clone())
-                .or_insert(Amount::ZERO);
-            *balance += deposit.amount() - prev_amount;
+            if out.script_pubkey.is_op_return() {
+                for instruction in out.script_pubkey.instructions() {
+                    if let Ok(bitcoin::blockdata::script::Instruction::PushBytes(bytes)) =
+                        instruction
+                    {
+                        if bytes.len() == 32 {
+                            if let Some(ref address) = prev_address {
+                                let (_, wtids) = amounts.get_mut(&address).unwrap();
+                                wtids.push(bytes.try_into().unwrap());
+                            }
+                        }
+                    }
+                }
+            }
         }
-        balances
+        for (address, (paid_out, wtids)) in amounts {
+            // let mut burned = 0;
+            // for wtid in wtids.iter() {
+            //     burned += self.get_withdrawal(*wtid).unwrap().amount;
+            // }
+            // if paid_out != burned {
+            //     continue;
+            // }
+            for wtid in wtids.iter() {
+                self.set_withdrawal_status(*wtid, status)
+                    .expect("withdrawal doesn't exist");
+            }
+        }
     }
 
-    pub fn collect_deposits(
-        &self,
-        deposits: impl Iterator<Item = (usize, Deposit)>,
-    ) -> Vec<DepositOutput> {
-        let mut deposit_outputs = vec![];
-        for item in deposits {
-            let (index, deposit) = item.clone();
-            let prev_deposit = match index {
-                0 => None,
-                _ => self.get_deposit(index - 1),
-            };
-            let prev_amount = prev_deposit
-                .as_ref()
-                .map_or(Amount::from_sat(0), |dep| dep.amount());
-            if deposit.amount() < prev_amount {
-                continue;
-            }
-            let deposit_output = DepositOutput {
-                index,
-                address: deposit.strdest.clone(),
-                amount: deposit.amount() - prev_amount,
-            };
-            deposit_outputs.push(deposit_output);
+    pub fn add_withdrawal(
+        &mut self,
+        wtid: [u8; 32],
+        withdrawal: &Vec<WithdrawalOutput>,
+    ) -> Result<(), withdrawal::Error> {
+        self.check_withdrawal(wtid);
+        // Can't add a withdrawal if one with the same wtid already exists.
+        if self.contains_withdrawal(wtid) {
+            return Err(withdrawal::Error::WithdrawalAlreadyExists);
         }
-        deposit_outputs
+        let withdrawal = bincode::serialize(&withdrawal).expect("failed to serialize withdrawal");
+        let status = bincode::serialize(&withdrawal::Status::Unspent)
+            .expect("failed to serialize withdrawal status");
+        (&self.withdrawals, &self.wtid_to_status, &self.unspent_withdrawals)
+            .transaction(|(withdrawals, wtid_to_status, unspent_withdrawals)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
+                withdrawals.insert(&wtid, withdrawal.clone())?;
+                wtid_to_status.insert(&wtid, status.clone())?;
+                unspent_withdrawals.insert(&wtid, &[])?;
+                Ok(())
+            }).expect("failed to add a withdrawal");
+        Ok(())
+    }
+
+    fn contains_withdrawal(&self, wtid: [u8; 32]) -> bool {
+        self.withdrawals
+            .contains_key(wtid)
+            .expect("failed to check if withdrawal exists")
+    }
+
+    // Check db consistency for wtid, and panic if db is inconsistent.
+    fn check_withdrawal(&self, wtid: [u8; 32]) {
+        let wt_exists = self
+            .withdrawals
+            .contains_key(wtid)
+            .expect("failed to check if withdrawal exists");
+        let wt_status_exists = self
+            .wtid_to_status
+            .contains_key(wtid)
+            .expect("failed to check if withdrawal status exists");
+        if wt_exists && !wt_status_exists {
+            panic!("withdrawal exists but withdrawal status doesn't");
+        } else if wt_status_exists && !wt_exists {
+            panic!("withdrawal status exists but withdrawal doesn't");
+        }
+        let status = self
+            .wtid_to_status
+            .get(wtid)
+            .expect("failed to get withdrawal status")
+            .map(|s| bincode::deserialize(&s).expect("failed to deserialize withdrawal status"));
+        let unspent_wt_exists = self
+            .unspent_withdrawals
+            .contains_key(wtid)
+            .expect("failed to check if wtid is in unspent withdrawals");
+        if status == Some(withdrawal::Status::Unspent) && !unspent_wt_exists {
+            panic!("withdrawal is unspent but it is not in unspent withdrawals key value store");
+        }
+        if status != Some(withdrawal::Status::Unspent) && unspent_wt_exists {
+            panic!("withdrawal is not unspent but it is in unspent withdrawals key value store");
+        }
+    }
+
+    pub fn set_withdrawal_status(
+        &mut self,
+        wtid: [u8; 32],
+        status: withdrawal::Status,
+    ) -> Result<(), withdrawal::Error> {
+        self.check_withdrawal(wtid);
+        // Can only update status of an already existing withdrawal.
+        if !self.contains_withdrawal(wtid) {
+            return Err(withdrawal::Error::WithdrawalDoesntExist);
+        }
+        (&self.wtid_to_status, &self.unspent_withdrawals)
+            .transaction(|(wtid_to_status, unspent_withdrawals)| -> sled::transaction::ConflictableTransactionResult<_, bincode::Error> {
+                match status {
+                    withdrawal::Status::Unspent => {
+                        unspent_withdrawals.insert(&wtid, &[])?
+                    },
+                    _ => {
+                        unspent_withdrawals.remove(&wtid)?
+                    },
+                };
+                let status_bin = bincode::serialize(&status).map_err(ConflictableTransactionError::Abort)?;
+                wtid_to_status.insert(&wtid, status_bin)?;
+                Ok(())
+            })
+            .expect("failed to update withdrawal status");
+        Ok(())
+    }
+
+    pub fn get_withdrawal(&self, wtid: [u8; 32]) -> Option<Vec<WithdrawalOutput>> {
+        self.withdrawals
+            .get(wtid)
+            .expect("failed to get withdrawal")
+            .map(|withdrawal| {
+                bincode::deserialize::<Vec<WithdrawalOutput>>(withdrawal.as_ref())
+                    .expect("failed to deserialize withdrawal")
+            })
+    }
+
+    pub fn get_withdrawal_status(&self, wtid: [u8; 32]) -> Option<withdrawal::Status> {
+        self.wtid_to_status
+            .get(wtid)
+            .expect("failed to get withdrawal status")
+            .map(|withdrawal_status| {
+                bincode::deserialize(withdrawal_status.as_ref())
+                    .expect("failed to deserialize withdrawal status")
+            })
     }
 }
 

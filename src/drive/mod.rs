@@ -15,7 +15,7 @@ use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use db::BlockData;
-pub use deposit::{Deposit, DepositOutput};
+pub use deposit::{Deposit};
 use std::collections::HashMap;
 use std::str::FromStr;
 pub use withdrawal::WithdrawalOutput;
@@ -141,7 +141,7 @@ impl Drivechain {
         None
     }
 
-    pub fn format_deposit_address(&self, str_dest: &String) -> String {
+    pub fn format_deposit_address(&self, str_dest: &str) -> String {
         let deposit_address: String = format!("s{}_{}_", self.client.this_sidechain, str_dest);
         let hash = sha256::Hash::hash(deposit_address.as_bytes()).to_string();
         let hash: String = hash[..6].into();
@@ -167,45 +167,7 @@ impl Drivechain {
         self.db.update_deposits(deposits.as_slice());
     }
 
-    pub fn validate_deposits(&self, start_index: usize) -> bool {
-        self.db
-            .deposits_since(start_index)
-            .iter()
-            .all(|(_, deposit)| self.client.verify_deposit(&deposit))
-    }
-
-    pub fn deposit_output(&self, index: usize) -> Option<DepositOutput> {
-        let deposit = self.db.get_deposit(index);
-        let prev_amount = match index {
-            0 => Some(Amount::from_sat(0)),
-            _ => self.db.get_deposit(index - 1).map(|d| d.amount()),
-        };
-        match (deposit, prev_amount) {
-            (Some(deposit), Some(prev_amount)) => Some(DepositOutput {
-                index: index,
-                address: deposit.strdest.clone(),
-                amount: deposit.amount() - prev_amount,
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn deposit_outputs_range(
-        &self,
-        first_index: usize,
-        last_index: usize,
-    ) -> Vec<DepositOutput> {
-        let deposits = self.db.deposits_range(first_index, last_index);
-        self.db.collect_deposits(deposits.into_iter())
-    }
-
-    pub fn deposit_outputs_since(&self, index: usize) -> Vec<DepositOutput> {
-        let deposits = self.db.deposits_since(index);
-        self.db.collect_deposits(deposits.into_iter())
-    }
-
     pub fn collect_wt_bundles(&self) -> Vec<Transaction> {
-        let mut block_height = 0;
         let mut bundles = vec![];
         let last_height = match self
             .db
