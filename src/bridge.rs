@@ -1,6 +1,8 @@
 use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
+use bitcoin::network::constants::Network;
+use bitcoin::util::address::{Address, Payload};
 use bitcoin::util::amount::Amount;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -33,6 +35,7 @@ mod ffi {
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64);
 
         fn connect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
+        fn disconnect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> bool;
         fn verify_block_bmm(
             &self,
@@ -143,6 +146,14 @@ impl Drivechain {
             amount: output.amount,
         });
         self.0.db.connect_side_outputs(outputs, just_check)
+    }
+
+    fn disconnect_deposit_outputs(&mut self, outputs: Vec<ffi::Output>, just_check: bool) -> bool {
+        let outputs = outputs.iter().map(|output| drive::deposit::Output {
+            address: output.address.clone(),
+            amount: output.amount,
+        });
+        self.0.db.disconnect_side_outputs(outputs, just_check)
     }
 
     fn format_deposit_address(&self, address: &str) -> String {

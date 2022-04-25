@@ -137,8 +137,36 @@ impl DB {
             .unwrap()
     }
 
-    pub fn disconnect_side_outputs(&mut self, outputs: &[Output], just_check: bool) -> bool {
-        false
+    pub fn disconnect_side_outputs(
+        &mut self,
+        outputs: impl Iterator<Item = Output>,
+        just_check: bool,
+    ) -> bool {
+        let mut side_balances = HashMap::<String, u64>::new();
+        for output in outputs {
+            let amount = side_balances.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
+        }
+        (&self.deposit_balances, &self.unbalanced_deposits)
+            .transaction(|(deposit_balances, unbalanced_deposits)| -> sled::transaction::ConflictableTransactionResult<bool, bincode::Error> {
+                for (address, side_delta) in side_balances.iter() {
+                    if let Some(balance) = deposit_balances.get(address.as_bytes())? {
+                        let (old_side_balance, main_balance) =
+                            bincode::deserialize::<(u64, u64)>(&balance).map_err(ConflictableTransactionError::Abort)?;
+                        let new_side_balance = old_side_balance - side_delta;
+                        if !just_check {
+                            let new_balance = (new_side_balance, main_balance);
+                            let new_balance = bincode::serialize(&new_balance).map_err(ConflictableTransactionError::Abort)?;
+                            deposit_balances
+                                .insert(address.as_bytes(), new_balance)?;
+                            unbalanced_deposits.insert(address.as_bytes(), &[])?;
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }).unwrap()
     }
 
     pub fn update_deposits(&self, deposits: &[Deposit]) {
