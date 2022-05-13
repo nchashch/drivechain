@@ -1,6 +1,5 @@
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WithdrawalOutput {
-    pub refund_dest: String,
     pub dest: String,
     pub amount: u64,
     pub mainchain_fee: u64,

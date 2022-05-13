@@ -45,6 +45,7 @@ mod ffi {
         ) -> bool;
         fn get_deposit_outputs(&self) -> Vec<Output>;
         fn format_deposit_address(&self, address: &str) -> String;
+        fn get_withdrawal_data(address: &str, fee: u64) -> Vec<u8>;
     }
 }
 
@@ -65,6 +66,19 @@ fn new_drivechain(
         rpcpassword.into(),
     );
     Box::new(Drivechain(drivechain))
+}
+
+// FIXME: Check network here.
+fn get_withdrawal_data(address: &str, fee: u64) -> Vec<u8> {
+    let address = Address::from_str(address).unwrap();
+    let hash = match address.payload {
+        Payload::ScriptHash(hash) => hash,
+        _ => panic!("wrong address type"),
+    };
+    let fee = fee.to_be_bytes().to_vec();
+    let vec = [hash.to_vec(), fee].concat();
+    dbg!(vec.len());
+    vec
 }
 
 impl Drivechain {

@@ -14,7 +14,6 @@ use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
-pub use db::BlockData;
 pub use deposit::{Deposit};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -167,130 +166,113 @@ impl Drivechain {
         self.db.update_deposits(deposits.as_slice());
     }
 
-    pub fn collect_wt_bundles(&self) -> Vec<Transaction> {
-        let mut bundles = vec![];
-        let last_height = match self
-            .db
-            .block_height_to_wtids
-            .last()
-            .expect("couldn't get last block number")
-        {
-            Some((last_height, _)) => last_height,
-            None => {
-                return vec![];
-            }
-        };
-        let last_height = BigEndian::read_u64(&last_height) as usize;
-        let last_height = get_waiting_end_height(last_height) + VOTING_PERIOD + WAITING_PERIOD;
-        dbg!(last_height);
-        let mut last_spent_height = 0;
-        let mut waiting_end_height = get_waiting_end_height(last_spent_height);
-        while waiting_end_height < last_height {
-            dbg!(waiting_end_height);
-            if let Some((spent_height, bundle)) =
-                self.create_wt_bundle(last_spent_height, waiting_end_height, MAX_WT_OUTPUT_COUNT)
-            {
-                last_spent_height = spent_height;
-                bundles.push(bundle);
-            }
-            waiting_end_height += VOTING_PERIOD + WAITING_PERIOD;
-        }
-        bundles
-    }
+    // pub fn collect_wt_bundles(&self) -> Vec<Transaction> {
+    //     let mut bundles = vec![];
+    //     let last_height = match self
+    //         .db
+    //         .block_height_to_wtids
+    //         .last()
+    //         .expect("couldn't get last block number")
+    //     {
+    //         Some((last_height, _)) => last_height,
+    //         None => {
+    //             return vec![];
+    //         }
+    //     };
+    //     let last_height = BigEndian::read_u64(&last_height) as usize;
+    //     let last_height = get_waiting_end_height(last_height) + VOTING_PERIOD + WAITING_PERIOD;
+    //     dbg!(last_height);
+    //     let mut last_spent_height = 0;
+    //     let mut waiting_end_height = get_waiting_end_height(last_spent_height);
+    //     while waiting_end_height < last_height {
+    //         dbg!(waiting_end_height);
+    //         if let Some((spent_height, bundle)) =
+    //             self.create_wt_bundle(last_spent_height, waiting_end_height, MAX_WT_OUTPUT_COUNT)
+    //         {
+    //             last_spent_height = spent_height;
+    //             bundles.push(bundle);
+    //         }
+    //         waiting_end_height += VOTING_PERIOD + WAITING_PERIOD;
+    //     }
+    //     bundles
+    // }
 
-    // This should be deterministic.
-    pub fn create_wt_bundle(
-        &self,
-        start: usize,
-        end: usize,
-        max_outputs: usize,
-    ) -> Option<(usize, Transaction)> {
-        let mut transactions = HashMap::new();
-        let mut total_outputs = 0;
-        let mut last_spent_height = start;
-        for block_height in start..end {
-            if let Some(block_transactions) =
-                self.db.get_block_withdrawal_transactions(block_height)
-            {
-                total_outputs += block_transactions.len();
-                if total_outputs > max_outputs {
-                    break;
-                }
-                let block_transactions = block_transactions.into_iter().filter(|(key, _)| {
-                    self.db.get_withdrawal_status(*key) == Some(withdrawal::Status::Unspent)
-                });
-                transactions.extend(block_transactions);
-                last_spent_height = block_height;
-            }
-        }
-        if transactions.len() == 0 {
-            return None;
-        }
-        dbg!(&transactions.len());
-        let script = script::Builder::new()
-            .push_opcode(opcodes::all::OP_RETURN)
-            .push_slice(SIDECHAIN_WTPRIME_RETURN_DEST)
-            .into_script();
-        let mut txouts = vec![];
-        let txout = TxOut {
-            value: 0,
-            script_pubkey: script,
-        };
-        txouts.push(txout);
-        let sum_mainchain_fees: u64 = transactions
-            .iter()
-            .map(|(_, wt)| wt.iter().map(|out| out.mainchain_fee))
-            .flatten()
-            .sum();
-        // Add an output for mainchain fee encoding (updated later)
-        let script = script::Builder::new()
-            .push_opcode(opcodes::all::OP_RETURN)
-            .push_slice(sum_mainchain_fees.to_le_bytes().as_ref())
-            .into_script();
-        let txout = TxOut {
-            value: 0,
-            script_pubkey: script,
-        };
-        txouts.push(txout);
-        let mut address_to_amount: HashMap<String, u64> = HashMap::new();
-        for out in transactions.values().flatten() {
-            let amount = address_to_amount.entry(out.dest.clone()).or_insert(0);
-            *amount += out.amount;
-        }
-        txouts.extend(address_to_amount.iter().map(|(dest, amount)| TxOut {
-            value: *amount,
-            script_pubkey: Address::from_str(dest.as_str()).unwrap().script_pubkey(),
-        }));
-        let mut txin = TxIn::default();
-        // OP_FALSE == OP_0
-        txin.script_sig = script::Builder::new()
-            .push_opcode(opcodes::OP_FALSE)
-            .into_script();
-        let tx = Transaction {
-            version: 2,
-            lock_time: 0,
-            input: vec![txin],
-            output: txouts,
-        };
-        Some((last_spent_height, tx))
-    }
-
-    pub fn add_withdrawal(
-        &mut self,
-        wtid: [u8; 32],
-        withdrawal: &Vec<WithdrawalOutput>,
-    ) -> Result<(), withdrawal::Error> {
-        for out in withdrawal {
-            Address::from_str(out.dest.as_str())?;
-        }
-        // Address::from_str(withdrawal.refund_dest.as_str())?;
-        self.db.add_withdrawal(wtid, withdrawal)?;
-        Ok(())
-    }
-
-    pub fn connect_block(&mut self, block: &BlockData) -> Result<(), withdrawal::Error> {
-        self.db.connect_block(block)
-    }
+    // // This should be deterministic.
+    // pub fn create_wt_bundle(
+    //     &self,
+    //     start: usize,
+    //     end: usize,
+    //     max_outputs: usize,
+    // ) -> Option<(usize, Transaction)> {
+    //     let mut transactions = HashMap::new();
+    //     let mut total_outputs = 0;
+    //     let mut last_spent_height = start;
+    //     for block_height in start..end {
+    //         if let Some(block_transactions) =
+    //             self.db.get_block_withdrawal_transactions(block_height)
+    //         {
+    //             total_outputs += block_transactions.len();
+    //             if total_outputs > max_outputs {
+    //                 break;
+    //             }
+    //             let block_transactions = block_transactions.into_iter().filter(|(key, _)| {
+    //                 self.db.get_withdrawal_status(*key) == Some(withdrawal::Status::Unspent)
+    //             });
+    //             transactions.extend(block_transactions);
+    //             last_spent_height = block_height;
+    //         }
+    //     }
+    //     if transactions.len() == 0 {
+    //         return None;
+    //     }
+    //     dbg!(&transactions.len());
+    //     let script = script::Builder::new()
+    //         .push_opcode(opcodes::all::OP_RETURN)
+    //         .push_slice(SIDECHAIN_WTPRIME_RETURN_DEST)
+    //         .into_script();
+    //     let mut txouts = vec![];
+    //     let txout = TxOut {
+    //         value: 0,
+    //         script_pubkey: script,
+    //     };
+    //     txouts.push(txout);
+    //     let sum_mainchain_fees: u64 = transactions
+    //         .iter()
+    //         .map(|(_, wt)| wt.iter().map(|out| out.mainchain_fee))
+    //         .flatten()
+    //         .sum();
+    //     // Add an output for mainchain fee encoding (updated later)
+    //     let script = script::Builder::new()
+    //         .push_opcode(opcodes::all::OP_RETURN)
+    //         .push_slice(sum_mainchain_fees.to_le_bytes().as_ref())
+    //         .into_script();
+    //     let txout = TxOut {
+    //         value: 0,
+    //         script_pubkey: script,
+    //     };
+    //     txouts.push(txout);
+    //     let mut address_to_amount: HashMap<String, u64> = HashMap::new();
+    //     for out in transactions.values().flatten() {
+    //         let amount = address_to_amount.entry(out.dest.clone()).or_insert(0);
+    //         *amount += out.amount;
+    //     }
+    //     txouts.extend(address_to_amount.iter().map(|(dest, amount)| TxOut {
+    //         value: *amount,
+    //         script_pubkey: Address::from_str(dest.as_str()).unwrap().script_pubkey(),
+    //     }));
+    //     let mut txin = TxIn::default();
+    //     // OP_FALSE == OP_0
+    //     txin.script_sig = script::Builder::new()
+    //         .push_opcode(opcodes::OP_FALSE)
+    //         .into_script();
+    //     let tx = Transaction {
+    //         version: 2,
+    //         lock_time: 0,
+    //         input: vec![txin],
+    //         output: txouts,
+    //     };
+    //     Some((last_spent_height, tx))
+    // }
 }
 
 #[derive(Debug)]
