@@ -1,9 +1,9 @@
 use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
-use bitcoin::network::constants::Network;
 use bitcoin::util::address::{Address, Payload};
 use bitcoin::util::amount::Amount;
+use byteorder::{BigEndian, ByteOrder};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -20,6 +20,12 @@ mod ffi {
         address: String,
         amount: u64,
     }
+    #[derive(Debug)]
+    struct Withdrawal {
+        outpoint: String,
+        withdrawal_data: String,
+        amount: u64,
+    }
     extern "Rust" {
         type Drivechain;
         fn new_drivechain(
@@ -34,6 +40,8 @@ mod ffi {
         fn confirm_bmm(&mut self) -> Vec<Block>;
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64);
 
+
+        fn connect_withdrawals(&mut self, withdrawals: Vec<Withdrawal>) -> bool;
         fn connect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn disconnect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> bool;
@@ -46,6 +54,7 @@ mod ffi {
         fn get_deposit_outputs(&self) -> Vec<Output>;
         fn format_deposit_address(&self, address: &str) -> String;
         fn get_withdrawal_data(address: &str, fee: u64) -> Vec<u8>;
+        fn flush(&mut self) -> bool;
     }
 }
 
@@ -154,6 +163,28 @@ impl Drivechain {
             .collect()
     }
 
+    fn connect_withdrawals(&mut self, withdrawals: Vec<ffi::Withdrawal>) -> bool {
+        let withdrawals: HashMap<Vec<u8>, drive::WithdrawalOutput> = withdrawals
+            .into_iter()
+            .map(|w| {
+                let mut dest: [u8; 20] = Default::default();
+                let withdrawal_data = hex::decode(w.withdrawal_data).unwrap();
+                dest.copy_from_slice(&withdrawal_data[0..20]);
+                let mainchain_fee = &withdrawal_data[20..28];
+                let mainchain_fee = BigEndian::read_u64(mainchain_fee);
+                (
+                    hex::decode(w.outpoint).unwrap(),
+                    drive::WithdrawalOutput {
+                        amount: w.amount,
+                        dest,
+                        mainchain_fee,
+                    },
+                )
+            })
+            .collect();
+        self.0.db.connect_withdrawals(withdrawals)
+    }
+
     fn connect_deposit_outputs(&mut self, outputs: Vec<ffi::Output>, just_check: bool) -> bool {
         let outputs = outputs.iter().map(|output| drive::deposit::Output {
             address: output.address.clone(),
@@ -172,6 +203,11 @@ impl Drivechain {
 
     fn format_deposit_address(&self, address: &str) -> String {
         self.0.format_deposit_address(address)
+    }
+
+    fn flush(&mut self) -> bool {
+        println!("drivechain flushed");
+        self.0.db.flush().is_ok()
     }
 }
 
