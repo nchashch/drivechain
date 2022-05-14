@@ -1,11 +1,18 @@
 use super::deposit::{Deposit, Output};
 use super::withdrawal::WithdrawalOutput;
 use bitcoin::blockdata::transaction::OutPoint;
+use bitcoin::blockdata::{
+    opcodes, script,
+    transaction::{Transaction, TxIn, TxOut},
+};
+use bitcoin::hash_types::ScriptHash;
+use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
+use bitcoin::util::psbt::serialize::Serialize;
 use byteorder::{BigEndian, ByteOrder};
 use sled::transaction::{abort, ConflictableTransactionError, TransactionError};
 use sled::Transactional;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const DEPOSITS: &[u8] = b"deposits";
 const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
@@ -13,6 +20,8 @@ const UNBALANCED_DEPOSITS: &[u8] = b"unbalanced_deposits";
 
 // outpoint -> (mainchain destination, mainchain fee, amount)
 const OUTPOINT_TO_WITHDRAWAL: &[u8] = b"outpoint_to_withdrawal";
+const SPENT_OUTPOINTS: &[u8] = b"spent_outpoints";
+const UNSPENT_OUTPOINTS: &[u8] = b"unspent_outpoints";
 const BUNDLE_HASH_TO_INPUTS: &[u8] = b"bundle_hash_to_inputs";
 
 pub struct DB {
@@ -20,7 +29,9 @@ pub struct DB {
     deposits: sled::Tree,
     deposit_balances: sled::Tree,
     unbalanced_deposits: sled::Tree,
-    pub outpoint_to_withdrawal: sled::Tree,
+    outpoint_to_withdrawal: sled::Tree,
+    spent_outpoints: sled::Tree,
+    unspent_outpoints: sled::Tree,
     bundle_hash_to_inputs: sled::Tree,
 }
 
@@ -45,6 +56,14 @@ impl DB {
             .open_tree(OUTPOINT_TO_WITHDRAWAL)
             .expect("couldn't open outpoint to withdrawal key value store");
 
+        let spent_outpoints = db
+            .open_tree(SPENT_OUTPOINTS)
+            .expect("couldn't open spent outpoints key value store");
+
+        let unspent_outpoints = db
+            .open_tree(UNSPENT_OUTPOINTS)
+            .expect("couldn't open unspent outpoints key value store");
+
         let bundle_hash_to_inputs = db
             .open_tree(BUNDLE_HASH_TO_INPUTS)
             .expect("couldn't open bundle hash to inputs key value store");
@@ -55,6 +74,8 @@ impl DB {
             deposit_balances,
             unbalanced_deposits,
             outpoint_to_withdrawal,
+            spent_outpoints,
+            unspent_outpoints,
             bundle_hash_to_inputs,
         }
     }
@@ -65,6 +86,7 @@ impl DB {
 
     pub fn get_deposit_outputs(&self) -> Vec<Output> {
         {
+            self.create_wt_bundle();
             let withdrawals: HashMap<String, WithdrawalOutput> = self
                 .outpoint_to_withdrawal
                 .iter()
@@ -113,16 +135,18 @@ impl DB {
     }
 
     pub fn connect_withdrawals(&mut self, withdrawals: HashMap<Vec<u8>, WithdrawalOutput>) -> bool {
-        for (outpoint, withdrawal) in withdrawals {
-            dbg!(hex::encode(outpoint.as_slice()), &withdrawal);
-            let outpoint = outpoint.as_slice();
-            let withdrawal =
-                bincode::serialize(&withdrawal).expect("failed to serialize withdrawal");
-            self.outpoint_to_withdrawal
-                .insert(outpoint, withdrawal)
-                .expect("failed to insert withdrawal");
-        }
-        true
+        (&self.outpoint_to_withdrawal, &self.unspent_outpoints)
+            .transaction(|(outpoint_to_withdrawal, unspent_outpoints)| {
+                for (outpoint, withdrawal) in withdrawals.iter() {
+                    dbg!(hex::encode(outpoint.as_slice()), &withdrawal);
+                    let outpoint = outpoint.as_slice();
+                    let withdrawal = bincode::serialize(&withdrawal).or_else(abort)?;
+                    outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
+                    unspent_outpoints.insert(outpoint, &[])?;
+                }
+                Ok(())
+            })
+            .is_ok()
     }
 
     pub fn connect_side_outputs(
@@ -371,6 +395,107 @@ impl DB {
         self.deposits
             .pop_max()
             .expect("failed to remove last deposit");
+    }
+
+    pub fn is_outpoint_spent(&self, outpoint: Vec<u8>) -> bool {
+        self.spent_outpoints
+            .contains_key(outpoint.as_slice())
+            .unwrap()
+    }
+
+    pub fn create_wt_bundle(&self) -> Option<bitcoin::Transaction> {
+        let withdrawals = self.unspent_outpoints.iter().map(|item| {
+            let (outpoint, _) = item.unwrap();
+            let withdrawal = self.outpoint_to_withdrawal.get(&outpoint).unwrap().unwrap();
+            let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal).unwrap();
+            (outpoint.to_vec(), withdrawal)
+        });
+
+        // Aggregate all outputs by destination.
+        // destination -> (amount, mainchain fee)
+        let mut dest_to_withdrawal = HashMap::<[u8; 20], (u64, u64)>::new();
+        let mut outpoints = vec![];
+        for withdrawal in withdrawals {
+            let (outpoint, output) = withdrawal;
+            outpoints.push(outpoint);
+            let (amount, mainchain_fee) = dest_to_withdrawal.entry(output.dest).or_insert((0, 0));
+            // Add up all amounts.
+            *amount += output.amount;
+            // Set the maximum mainchain fee.
+            *mainchain_fee = std::cmp::max(*mainchain_fee, output.mainchain_fee);
+        }
+        // HashMap used for aggregation into a vector.
+        let mut outputs: Vec<WithdrawalOutput> = dest_to_withdrawal
+            .into_iter()
+            .map(|(dest, (amount, mainchain_fee))| WithdrawalOutput {
+                dest,
+                amount,
+                mainchain_fee,
+            })
+            .collect();
+        // Sort the outputs in descending order.
+        //
+        // Outputs are sorted first by mainchain_fee, then by dest, and then by
+        // amount (see Ord implementation in withdrawal.rs).
+        //
+        // Because there are no outputs with repeating dest in this vector,
+        // amount will never affect the order only mainchain_fee and dest.
+        outputs.sort_by_key(|a| std::cmp::Reverse(*a));
+        let mut fee = 0;
+        let mut bundle_outputs = vec![];
+        for output in outputs {
+            let script_hash = ScriptHash::from_inner(output.dest);
+            let address = bitcoin::Address {
+                payload: bitcoin::util::address::Payload::ScriptHash(script_hash),
+                network: bitcoin::Network::Testnet,
+            };
+            let bundle_output = bitcoin::TxOut {
+                value: output.amount,
+                script_pubkey: address.script_pubkey(),
+            };
+            bundle_outputs.push(bundle_output);
+            fee += output.mainchain_fee;
+            const MAX_BUNDLE_OUTPUTS: usize = 10;
+            if bundle_outputs.len() >= MAX_BUNDLE_OUTPUTS {
+                break;
+            }
+        }
+        let txin = TxIn {
+            script_sig: script::Builder::new()
+                // OP_FALSE == OP_0
+                .push_opcode(opcodes::OP_FALSE)
+                .into_script(),
+            ..TxIn::default()
+        };
+        // Create return dest output.
+        const SIDECHAIN_WTPRIME_RETURN_DEST: &[u8] = b"D";
+        let script = script::Builder::new()
+            .push_opcode(opcodes::all::OP_RETURN)
+            .push_slice(SIDECHAIN_WTPRIME_RETURN_DEST)
+            .into_script();
+        let return_dest_txout = TxOut {
+            value: 0,
+            script_pubkey: script,
+        };
+        // Create mainchain fee output.
+        let script = script::Builder::new()
+            .push_opcode(opcodes::all::OP_RETURN)
+            .push_slice(fee.to_le_bytes().as_ref())
+            .into_script();
+        let mainchain_fee_txout = TxOut {
+            value: 0,
+            script_pubkey: script,
+        };
+        let bundle = bitcoin::Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![txin],
+            output: [vec![return_dest_txout, mainchain_fee_txout], bundle_outputs].concat(),
+        };
+        dbg!(bundle.txid());
+        dbg!(&bundle);
+        dbg!(hex::encode(bundle.serialize()));
+        Some(bundle)
     }
 }
 
