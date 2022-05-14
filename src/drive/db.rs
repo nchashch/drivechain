@@ -20,7 +20,7 @@ pub struct DB {
     deposits: sled::Tree,
     deposit_balances: sled::Tree,
     unbalanced_deposits: sled::Tree,
-    outpoint_to_withdrawal: sled::Tree,
+    pub outpoint_to_withdrawal: sled::Tree,
     bundle_hash_to_inputs: sled::Tree,
 }
 
@@ -64,18 +64,31 @@ impl DB {
     }
 
     pub fn get_deposit_outputs(&self) -> Vec<Output> {
-        let balances: HashMap<String, (u64, u64)> = self
-            .deposit_balances
-            .iter()
-            .map(|item| {
-                let (address, balance) = item.unwrap();
-                let address = String::from_utf8(address.to_vec()).unwrap();
-                let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
-                    .expect("failed to deserialize deposit balance");
-                (address, (side_balance, main_balance))
-            })
-            .collect();
-        dbg!(balances);
+        {
+            let withdrawals: HashMap<String, WithdrawalOutput> = self
+                .outpoint_to_withdrawal
+                .iter()
+                .map(|item| {
+                    let (outpoint, withdrawal) = item.unwrap();
+                    let outpoint = hex::encode(outpoint);
+                    let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal).unwrap();
+                    (outpoint, withdrawal)
+                })
+                .collect();
+            dbg!(withdrawals);
+            let deposit_balances: HashMap<String, (u64, u64)> = self
+                .deposit_balances
+                .iter()
+                .map(|item| {
+                    let (address, balance) = item.unwrap();
+                    let address = String::from_utf8(address.to_vec()).unwrap();
+                    let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
+                        .expect("failed to deserialize deposit balance");
+                    (address, (side_balance, main_balance))
+                })
+                .collect();
+            dbg!(deposit_balances);
+        }
         let outs = self
             .unbalanced_deposits
             .iter()

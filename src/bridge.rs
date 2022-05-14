@@ -40,8 +40,9 @@ mod ffi {
         fn confirm_bmm(&mut self) -> Vec<Block>;
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64);
 
-
         fn connect_withdrawals(&mut self, withdrawals: Vec<Withdrawal>) -> bool;
+        fn get_withdrawal_outpoints(&self) -> Vec<String>;
+        fn is_outpoint_spent(&self, outpoint: String) -> bool;
         fn connect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn disconnect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> bool;
@@ -185,6 +186,23 @@ impl Drivechain {
         self.0.db.connect_withdrawals(withdrawals)
     }
 
+    fn get_withdrawal_outpoints(&self) -> Vec<String> {
+        self.0
+            .db
+            .outpoint_to_withdrawal
+            .iter()
+            .map(|item| {
+                let (outpoint, _) = item.unwrap();
+                hex::encode(outpoint)
+            })
+            .collect()
+    }
+
+    fn is_outpoint_spent(&self, outpoint: String) -> bool {
+        let outpoint = hex::decode(outpoint).unwrap();
+        self.0.db.outpoint_to_withdrawal.contains_key(outpoint).unwrap()
+    }
+
     fn connect_deposit_outputs(&mut self, outputs: Vec<ffi::Output>, just_check: bool) -> bool {
         let outputs = outputs.iter().map(|output| drive::deposit::Output {
             address: output.address.clone(),
@@ -206,7 +224,6 @@ impl Drivechain {
     }
 
     fn flush(&mut self) -> bool {
-        println!("drivechain flushed");
         self.0.db.flush().is_ok()
     }
 }

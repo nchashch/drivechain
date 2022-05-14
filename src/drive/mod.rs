@@ -15,8 +15,6 @@ use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use deposit::{Deposit};
-use std::collections::HashMap;
-use std::str::FromStr;
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
