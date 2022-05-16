@@ -1,5 +1,6 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 
+// FIXME: Also order withdrawal outputs by block height.
 #[derive(Eq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WithdrawalOutput {
     pub dest: [u8; 20],

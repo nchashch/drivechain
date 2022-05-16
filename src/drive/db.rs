@@ -167,6 +167,10 @@ impl DB {
     // FIXME: It should be impossible to disconnect spent withdrawals if on
     // mainchain the bundle that spends the corresponding outpoints is not
     // disconnected as well.
+    //
+    // It might make sense to only create bundles from withdrawal outputs that
+    // have some minimum number of confirmations to make it harder to invalidate
+    // the current bundle by reorging the sidechain independently of mainchain.
     pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> bool {
         (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
             .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
