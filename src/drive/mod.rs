@@ -173,6 +173,8 @@ impl Drivechain {
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
+    // TODO: Add a waiting period between bundles to give people an opportunity
+    // to refund.
     pub fn attempt_bundle_broadcast(&mut self) {
         {
             let bundles: HashMap<Txid, usize> = self
