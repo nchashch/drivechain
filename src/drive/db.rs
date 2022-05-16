@@ -5,14 +5,14 @@ use bitcoin::blockdata::{
     opcodes, script,
     transaction::{Transaction, TxIn, TxOut},
 };
-use bitcoin::hash_types::ScriptHash;
+use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use bitcoin::util::psbt::serialize::Serialize;
 use byteorder::{BigEndian, ByteOrder};
 use sled::transaction::{abort, ConflictableTransactionError, TransactionError};
 use sled::Transactional;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const DEPOSITS: &[u8] = b"deposits";
 const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
@@ -23,6 +23,8 @@ const OUTPOINT_TO_WITHDRAWAL: &[u8] = b"outpoint_to_withdrawal";
 const SPENT_OUTPOINTS: &[u8] = b"spent_outpoints";
 const UNSPENT_OUTPOINTS: &[u8] = b"unspent_outpoints";
 const BUNDLE_HASH_TO_INPUTS: &[u8] = b"bundle_hash_to_inputs";
+const FAILED_BUNDLE_HASHES: &[u8] = b"failed_bundle_hashes";
+const SPENT_BUNDLE_HASHES: &[u8] = b"spent_bundle_hashes";
 
 pub struct DB {
     db: sled::Db,
@@ -32,7 +34,11 @@ pub struct DB {
     outpoint_to_withdrawal: sled::Tree,
     spent_outpoints: sled::Tree,
     unspent_outpoints: sled::Tree,
-    bundle_hash_to_inputs: sled::Tree,
+    pub bundle_hash_to_inputs: sled::Tree,
+
+    // Failed and spent bundle hashes that we have already seen.
+    failed_bundle_hashes: sled::Tree,
+    spent_bundle_hashes: sled::Tree,
 }
 
 impl DB {
@@ -68,6 +74,14 @@ impl DB {
             .open_tree(BUNDLE_HASH_TO_INPUTS)
             .expect("couldn't open bundle hash to inputs key value store");
 
+        let failed_bundle_hashes = db
+            .open_tree(FAILED_BUNDLE_HASHES)
+            .expect("couldn't open failed bundle hashes key value store");
+
+        let spent_bundle_hashes = db
+            .open_tree(SPENT_BUNDLE_HASHES)
+            .expect("couldn't open spent bundle hashes key value store");
+
         DB {
             db,
             deposits,
@@ -77,6 +91,8 @@ impl DB {
             spent_outpoints,
             unspent_outpoints,
             bundle_hash_to_inputs,
+            failed_bundle_hashes,
+            spent_bundle_hashes,
         }
     }
 
@@ -86,7 +102,6 @@ impl DB {
 
     pub fn get_deposit_outputs(&self) -> Vec<Output> {
         {
-            self.create_wt_bundle();
             let withdrawals: HashMap<String, WithdrawalOutput> = self
                 .outpoint_to_withdrawal
                 .iter()
@@ -403,7 +418,84 @@ impl DB {
             .unwrap()
     }
 
-    pub fn create_wt_bundle(&self) -> Option<bitcoin::Transaction> {
+    pub fn vote_bundle(&mut self, txid: &Txid) {
+        let inputs = self.get_inputs(txid);
+        (&self.unspent_outpoints, &self.spent_outpoints).transaction(
+            |(unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
+                for input in inputs.iter() {
+                    unspent_outpoints.remove(input.as_slice())?;
+                    spent_outpoints.insert(input.as_slice(), &[])?;
+                }
+                Ok(())
+            },
+        ).expect("failed to mark voting bundle inputs as spent");
+    }
+
+    pub fn spend_bundle(&mut self, txid: &Txid) {
+        let inputs = self.get_inputs(txid);
+        (&self.spent_bundle_hashes, &self.unspent_outpoints, &self.spent_outpoints).transaction(
+            |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
+                spent_bundle_hashes.insert(txid.as_inner(), &[])?;
+                for input in inputs.iter() {
+                    unspent_outpoints.remove(input.as_slice())?;
+                    spent_outpoints.insert(input.as_slice(), &[])?;
+                }
+                Ok(())
+            },
+        ).expect("failed to mark bundle as spent");
+    }
+
+    pub fn fail_bundle(&mut self, txid: &Txid) {
+        let inputs = self.get_inputs(txid);
+        (&self.failed_bundle_hashes, &self.unspent_outpoints, &self.spent_outpoints).transaction(
+            |(failed_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
+                failed_bundle_hashes.insert(txid.as_inner(), &[])?;
+                for input in inputs.iter() {
+                    spent_outpoints.remove(input.as_slice())?;
+                    unspent_outpoints.insert(input.as_slice(), &[])?;
+                }
+                Ok(())
+            },
+        ).expect("failed to mark bundle as failed");
+    }
+
+    pub fn get_spent_bundle_hashes(&self) -> HashSet<Txid> {
+        self.spent_bundle_hashes
+            .iter()
+            .map(|item| {
+                let (txid, _) = item.unwrap();
+                let mut txid_inner: [u8; 32] = Default::default();
+                txid_inner.copy_from_slice(&txid);
+                Txid::from_inner(txid_inner)
+            })
+            .collect()
+    }
+
+    pub fn get_failed_bundle_hashes(&self) -> HashSet<Txid> {
+        self.failed_bundle_hashes
+            .iter()
+            .map(|item| {
+                let (txid, _) = item.unwrap();
+                let mut txid_inner: [u8; 32] = Default::default();
+                txid_inner.copy_from_slice(&txid);
+                Txid::from_inner(txid_inner)
+            })
+            .collect()
+    }
+
+    pub fn get_inputs(&mut self, txid: &Txid) -> Vec<Vec<u8>> {
+        let hash = txid.into_inner();
+        self.bundle_hash_to_inputs
+            .get(hash)
+            .expect("failed to get bundle inputs")
+            .map(|inputs| {
+                bincode::deserialize::<Vec<Vec<u8>>>(&inputs)
+                    .expect("failed to deserialize bundle inputs")
+            })
+            .unwrap_or(vec![])
+    }
+
+    pub fn create_bundle(&mut self) -> Option<bitcoin::Transaction> {
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
             let (outpoint, _) = item.unwrap();
             let withdrawal = self.outpoint_to_withdrawal.get(&outpoint).unwrap().unwrap();
@@ -468,6 +560,7 @@ impl DB {
             ..TxIn::default()
         };
         // Create return dest output.
+        // The destination string for the change of a WT^
         const SIDECHAIN_WTPRIME_RETURN_DEST: &[u8] = b"D";
         let script = script::Builder::new()
             .push_opcode(opcodes::all::OP_RETURN)
@@ -492,9 +585,15 @@ impl DB {
             input: vec![txin],
             output: [vec![return_dest_txout, mainchain_fee_txout], bundle_outputs].concat(),
         };
-        dbg!(bundle.txid());
-        dbg!(&bundle);
-        dbg!(hex::encode(bundle.serialize()));
+        {
+            let hash = bundle.txid();
+            let hash = hash.into_inner();
+            let inputs = outpoints;
+            let inputs = bincode::serialize(&inputs).expect("failed to serialize bundle inputs");
+            self.bundle_hash_to_inputs
+                .insert(hash, inputs)
+                .expect("failed to write bundle inputs");
+        }
         Some(bundle)
     }
 }

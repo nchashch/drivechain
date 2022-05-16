@@ -4,7 +4,6 @@ use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
 use bitcoin::util::psbt::serialize::Deserialize;
 use hyper::{Body, Client, Method, Request};
-use serde;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use serde_json::value::Value;
@@ -232,7 +231,40 @@ impl DrivechainClient {
             .map(|txid| Txid::from_str(txid.as_str().unwrap()).unwrap())
     }
 
-    pub fn get_spent_withdrawal_bundle_hashes(&self) -> Vec<String> {
+    pub fn is_bundle_spent(&self, txid: &Txid) -> bool {
+        let params = vec![
+            json!(txid.to_string()),
+            json!(self.this_sidechain),
+        ];
+        let value = self.send_request::<Value>("havespentwithdrawal", &params).unwrap();
+        value["result"].as_bool().unwrap()
+    }
+
+    pub fn is_bundle_failed(&self, txid: &Txid) -> bool {
+        let params = vec![
+            json!(txid.to_string()),
+            json!(self.this_sidechain),
+        ];
+        let value = self.send_request::<Value>("havefailedwithdrawal", &params).unwrap();
+        value["result"].as_bool().unwrap()
+    }
+
+    pub fn get_failed_withdrawal_bundle_hashes(&self) -> HashSet<Txid> {
+        let params = vec![];
+        let value = self
+            .send_request::<Value>("listfailedwithdrawals", &params)
+            .unwrap();
+        if let Some(result) = value["result"].as_array() {
+            return result
+                .iter()
+                .filter(|v| v["nsidechain"].as_u64().unwrap() as usize == self.this_sidechain)
+                .map(|v| Txid::from_str(v["hash"].as_str().unwrap()).unwrap())
+                .collect();
+        }
+        HashSet::new()
+    }
+
+    pub fn get_spent_withdrawal_bundle_hashes(&self) -> HashSet<Txid> {
         let params = vec![];
         let value = self
             .send_request::<Value>("listspentwithdrawals", &params)
@@ -241,13 +273,13 @@ impl DrivechainClient {
             return result
                 .iter()
                 .filter(|v| v["nsidechain"].as_u64().unwrap() as usize == self.this_sidechain)
-                .map(|v| v["hash"].as_str().unwrap().into())
+                .map(|v| Txid::from_str(v["hash"].as_str().unwrap()).unwrap())
                 .collect();
         }
-        vec![]
+        HashSet::new()
     }
 
-    pub fn get_pending_withdrawal_bundle_blind_hashes(&self) -> HashSet<String> {
+    pub fn get_voting_withdrawal_bundle_hashes(&self) -> HashSet<Txid> {
         let params = vec![json!(self.this_sidechain)];
         let value = self
             .send_request::<Value>("listwithdrawalstatus", &params)
@@ -255,7 +287,7 @@ impl DrivechainClient {
         if let Some(result) = value["result"].as_array() {
             return result
                 .iter()
-                .map(|v| v["hash"].as_str().unwrap().into())
+                .map(|v| Txid::from_str(v["hash"].as_str().unwrap()).unwrap())
                 .collect();
         }
         HashSet::new()

@@ -3,18 +3,13 @@ mod coinbase_data;
 mod db;
 pub mod deposit;
 pub mod withdrawal;
-use bitcoin::blockdata::{
-    opcodes, script,
-    transaction::{Transaction, TxIn, TxOut},
-};
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::util::address::Address;
 use bitcoin::util::amount::Amount;
-use byteorder::{BigEndian, ByteOrder};
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
-pub use deposit::{Deposit};
+pub use deposit::Deposit;
+use std::collections::HashMap;
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
@@ -30,12 +25,6 @@ pub struct Drivechain {
     pub db: db::DB,
 }
 
-// The destination string for the change of a WT^
-const SIDECHAIN_WTPRIME_RETURN_DEST: &[u8] = b"D";
-const MAX_WT_OUTPUT_COUNT: usize = 100;
-const WAITING_PERIOD: usize = 50;
-const VOTING_PERIOD: usize = 50;
-
 impl Drivechain {
     pub fn new<P: AsRef<std::path::Path>>(
         db_path: P,
@@ -48,12 +37,12 @@ impl Drivechain {
         const MAINCHAIN_PORT: usize = 18443;
 
         let client = DrivechainClient {
-            this_sidechain: this_sidechain,
-            key_hash: key_hash,
+            this_sidechain,
+            key_hash,
             host: LOCALHOST.into(),
             port: MAINCHAIN_PORT,
-            rpcuser: rpcuser,
-            rpcpassword: rpcpassword,
+            rpcuser,
+            rpcpassword,
         };
 
         Drivechain {
@@ -164,113 +153,83 @@ impl Drivechain {
         self.db.update_deposits(deposits.as_slice());
     }
 
-    // pub fn collect_wt_bundles(&self) -> Vec<Transaction> {
-    //     let mut bundles = vec![];
-    //     let last_height = match self
-    //         .db
-    //         .block_height_to_wtids
-    //         .last()
-    //         .expect("couldn't get last block number")
-    //     {
-    //         Some((last_height, _)) => last_height,
-    //         None => {
-    //             return vec![];
-    //         }
-    //     };
-    //     let last_height = BigEndian::read_u64(&last_height) as usize;
-    //     let last_height = get_waiting_end_height(last_height) + VOTING_PERIOD + WAITING_PERIOD;
-    //     dbg!(last_height);
-    //     let mut last_spent_height = 0;
-    //     let mut waiting_end_height = get_waiting_end_height(last_spent_height);
-    //     while waiting_end_height < last_height {
-    //         dbg!(waiting_end_height);
-    //         if let Some((spent_height, bundle)) =
-    //             self.create_wt_bundle(last_spent_height, waiting_end_height, MAX_WT_OUTPUT_COUNT)
-    //         {
-    //             last_spent_height = spent_height;
-    //             bundles.push(bundle);
-    //         }
-    //         waiting_end_height += VOTING_PERIOD + WAITING_PERIOD;
-    //     }
-    //     bundles
-    // }
+    fn update_bundles(&mut self) {
+        let known_failed = self.db.get_failed_bundle_hashes();
+        let failed = self.client.get_failed_withdrawal_bundle_hashes();
+        let failed = failed.difference(&known_failed);
+        for txid in failed {
+            self.db.fail_bundle(txid);
+        }
+        let known_spent = self.db.get_spent_bundle_hashes();
+        let spent = self.client.get_spent_withdrawal_bundle_hashes();
+        let spent = spent.difference(&known_spent);
+        for txid in spent {
+            self.db.spend_bundle(txid);
+        }
+        let voting = self.client.get_voting_withdrawal_bundle_hashes();
+        for txid in voting {
+            self.db.vote_bundle(&txid);
+        }
+    }
 
-    // // This should be deterministic.
-    // pub fn create_wt_bundle(
-    //     &self,
-    //     start: usize,
-    //     end: usize,
-    //     max_outputs: usize,
-    // ) -> Option<(usize, Transaction)> {
-    //     let mut transactions = HashMap::new();
-    //     let mut total_outputs = 0;
-    //     let mut last_spent_height = start;
-    //     for block_height in start..end {
-    //         if let Some(block_transactions) =
-    //             self.db.get_block_withdrawal_transactions(block_height)
-    //         {
-    //             total_outputs += block_transactions.len();
-    //             if total_outputs > max_outputs {
-    //                 break;
-    //             }
-    //             let block_transactions = block_transactions.into_iter().filter(|(key, _)| {
-    //                 self.db.get_withdrawal_status(*key) == Some(withdrawal::Status::Unspent)
-    //             });
-    //             transactions.extend(block_transactions);
-    //             last_spent_height = block_height;
-    //         }
-    //     }
-    //     if transactions.len() == 0 {
-    //         return None;
-    //     }
-    //     dbg!(&transactions.len());
-    //     let script = script::Builder::new()
-    //         .push_opcode(opcodes::all::OP_RETURN)
-    //         .push_slice(SIDECHAIN_WTPRIME_RETURN_DEST)
-    //         .into_script();
-    //     let mut txouts = vec![];
-    //     let txout = TxOut {
-    //         value: 0,
-    //         script_pubkey: script,
-    //     };
-    //     txouts.push(txout);
-    //     let sum_mainchain_fees: u64 = transactions
-    //         .iter()
-    //         .map(|(_, wt)| wt.iter().map(|out| out.mainchain_fee))
-    //         .flatten()
-    //         .sum();
-    //     // Add an output for mainchain fee encoding (updated later)
-    //     let script = script::Builder::new()
-    //         .push_opcode(opcodes::all::OP_RETURN)
-    //         .push_slice(sum_mainchain_fees.to_le_bytes().as_ref())
-    //         .into_script();
-    //     let txout = TxOut {
-    //         value: 0,
-    //         script_pubkey: script,
-    //     };
-    //     txouts.push(txout);
-    //     let mut address_to_amount: HashMap<String, u64> = HashMap::new();
-    //     for out in transactions.values().flatten() {
-    //         let amount = address_to_amount.entry(out.dest.clone()).or_insert(0);
-    //         *amount += out.amount;
-    //     }
-    //     txouts.extend(address_to_amount.iter().map(|(dest, amount)| TxOut {
-    //         value: *amount,
-    //         script_pubkey: Address::from_str(dest.as_str()).unwrap().script_pubkey(),
-    //     }));
-    //     let mut txin = TxIn::default();
-    //     // OP_FALSE == OP_0
-    //     txin.script_sig = script::Builder::new()
-    //         .push_opcode(opcodes::OP_FALSE)
-    //         .into_script();
-    //     let tx = Transaction {
-    //         version: 2,
-    //         lock_time: 0,
-    //         input: vec![txin],
-    //         output: txouts,
-    //     };
-    //     Some((last_spent_height, tx))
-    // }
+    pub fn attempt_bundle_broadcast(&mut self) {
+        {
+            let bundles: HashMap<Txid, usize> = self
+                .db
+                .bundle_hash_to_inputs
+                .iter()
+                .map(|item| {
+                    let (txid, inputs) = item.unwrap();
+                    let mut txid_inner: [u8; 32] = Default::default();
+                    txid_inner.copy_from_slice(&txid);
+                    let txid = Txid::from_inner(txid_inner);
+                    let inputs = bincode::deserialize::<Vec<Vec<u8>>>(&inputs).unwrap();
+                    (txid, inputs.len())
+                })
+                .collect();
+            dbg!(bundles);
+        }
+        self.update_bundles();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes();
+        // If a bundle is already being voted on we don't need to broadcast a
+        // new one.
+        if !voting.is_empty() {
+            return;
+        }
+        let bundle = self.db.create_bundle().expect("failed to create bundle");
+        dbg!(self.client.get_failed_withdrawal_bundle_hashes());
+        dbg!(self.client.get_spent_withdrawal_bundle_hashes());
+        dbg!(self.client.get_voting_withdrawal_bundle_hashes());
+        dbg!(
+            &bundle,
+            bundle.txid(),
+            self.get_bundle_status(&bundle.txid()),
+        );
+        let status = self.get_bundle_status(&bundle.txid());
+        // We broadcast a bundle only if it was not seen before, meaning it is
+        // neither failed nor spent.
+        if status == BundleStatus::New {
+            self.client
+                .broadcast_withdrawal_bundle(&bundle)
+                .expect("failed to broadcast bundle");
+            self.db.vote_bundle(&bundle.txid());
+        }
+    }
+
+    pub fn get_bundle_status(&self, txid: &Txid) -> BundleStatus {
+        let voting = self.client.get_voting_withdrawal_bundle_hashes();
+        let failed = self.client.get_failed_withdrawal_bundle_hashes();
+        let spent = self.client.get_spent_withdrawal_bundle_hashes();
+        if voting.contains(txid) {
+            BundleStatus::Voting
+        } else if failed.contains(txid) {
+            BundleStatus::Failed
+        } else if spent.contains(txid) {
+            BundleStatus::Spent
+        } else {
+            BundleStatus::New
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -295,22 +254,10 @@ struct BMMRequest {
     side_block_data: Vec<u8>,
 }
 
-#[derive(Debug)]
-enum Status {
-    Waiting,
+#[derive(Debug, Eq, PartialEq)]
+pub enum BundleStatus {
+    New,
     Voting,
-}
-
-fn get_waiting_end_height(block_height: usize) -> usize {
-    let remainder = block_height % (WAITING_PERIOD + VOTING_PERIOD);
-    block_height - remainder + WAITING_PERIOD
-}
-
-fn get_status(block_height: usize) -> Status {
-    let remainder = block_height % (WAITING_PERIOD + VOTING_PERIOD);
-    if remainder < WAITING_PERIOD {
-        Status::Waiting
-    } else {
-        Status::Voting
-    }
+    Failed,
+    Spent,
 }

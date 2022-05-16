@@ -41,6 +41,7 @@ mod ffi {
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64);
 
         fn connect_withdrawals(&mut self, withdrawals: Vec<Withdrawal>) -> bool;
+        fn attempt_bundle_broadcast(&mut self);
         fn is_outpoint_spent(&self, outpoint: String) -> bool;
         fn connect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
         fn disconnect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
@@ -183,6 +184,10 @@ impl Drivechain {
             })
             .collect();
         self.0.db.connect_withdrawals(withdrawals)
+    }
+
+    fn attempt_bundle_broadcast(&mut self) {
+        self.0.attempt_bundle_broadcast();
     }
 
     fn is_outpoint_spent(&self, outpoint: String) -> bool {
