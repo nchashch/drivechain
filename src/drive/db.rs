@@ -18,10 +18,10 @@ const DEPOSITS: &[u8] = b"deposits";
 const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
 const UNBALANCED_DEPOSITS: &[u8] = b"unbalanced_deposits";
 
-// outpoint -> (mainchain destination, mainchain fee, amount)
 const OUTPOINT_TO_WITHDRAWAL: &[u8] = b"outpoint_to_withdrawal";
 const SPENT_OUTPOINTS: &[u8] = b"spent_outpoints";
 const UNSPENT_OUTPOINTS: &[u8] = b"unspent_outpoints";
+
 const BUNDLE_HASH_TO_INPUTS: &[u8] = b"bundle_hash_to_inputs";
 const FAILED_BUNDLE_HASHES: &[u8] = b"failed_bundle_hashes";
 const SPENT_BUNDLE_HASHES: &[u8] = b"spent_bundle_hashes";
@@ -164,12 +164,29 @@ impl DB {
             .is_ok()
     }
 
-    pub fn connect_side_outputs(
+    // FIXME: It should be impossible to disconnect spent withdrawals if on
+    // mainchain the bundle that spends the corresponding outpoints is not
+    // disconnected as well.
+    pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> bool {
+        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
+            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
+                for outpoint in outpoints.iter() {
+                    let outpoint = outpoint.as_slice();
+                    outpoint_to_withdrawal.remove(outpoint)?;
+                    unspent_outpoints.remove(outpoint)?;
+                    spent_outpoints.remove(outpoint)?;
+                }
+                Ok(())
+            })
+            .is_ok()
+    }
+
+    pub fn connect_deposit_outputs(
         &mut self,
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
     ) -> bool {
-        println!("connect_side_outputs");
+        println!("connect_deposit_outputs");
         let mut side_balances = HashMap::<String, u64>::new();
         for output in outputs {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
@@ -215,12 +232,12 @@ impl DB {
         result.is_ok()
     }
 
-    pub fn disconnect_side_outputs(
+    pub fn disconnect_deposit_outputs(
         &mut self,
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
     ) -> bool {
-        println!("disconnect_side_outputs");
+        println!("disconnect_deposit_outputs");
         let mut side_balances = HashMap::<String, u64>::new();
         for output in outputs {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
