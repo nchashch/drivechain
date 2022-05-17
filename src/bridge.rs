@@ -180,6 +180,8 @@ impl Drivechain {
                         amount: w.amount,
                         dest,
                         mainchain_fee,
+                        // height is set later in Db::connect_withdrawals.
+                        height: 0,
                     },
                 )
             })

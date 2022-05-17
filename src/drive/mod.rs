@@ -173,8 +173,6 @@ impl Drivechain {
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
-    // TODO: Add a waiting period between bundles to give people an opportunity
-    // to refund.
     pub fn attempt_bundle_broadcast(&mut self) {
         {
             let bundles: HashMap<Txid, usize> = self
@@ -193,13 +191,32 @@ impl Drivechain {
             dbg!(bundles);
         }
         self.update_bundles();
+        // Wait for some time after a failed bundle to give people an
+        // opportunity to refund. If we would create a new bundle immediately,
+        // some outputs would be included in it immediately again, and so they
+        // would never become refundable.
+        //
+        // We don't have to wait after a spent bundle, because, if mainchain
+        // doesn't reorg, all withdrawal outputs in it will remain spent forever
+        // anyway.
+        //
+        // FIXME: Make this value different for regtest/testnet/mainnet.
+        const BUNDLE_WAIT_PERIOD: usize = 5;
+        let blocks_since_last_failed_bundle = self.db.get_blocks_since_last_failed_bundle();
+        if blocks_since_last_failed_bundle < BUNDLE_WAIT_PERIOD {
+            println!("last faild bundle was too soon");
+            return;
+        }
         let voting = self.client.get_voting_withdrawal_bundle_hashes();
         // If a bundle is already being voted on we don't need to broadcast a
         // new one.
         if !voting.is_empty() {
             return;
         }
-        let bundle = self.db.create_bundle().expect("failed to create bundle");
+        let bundle = match self.db.create_bundle() {
+            Some(bundle) => bundle,
+            None => return,
+        };
         dbg!(self.client.get_failed_withdrawal_bundle_hashes());
         dbg!(self.client.get_spent_withdrawal_bundle_hashes());
         dbg!(self.client.get_voting_withdrawal_bundle_hashes());

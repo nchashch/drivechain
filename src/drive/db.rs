@@ -8,7 +8,6 @@ use bitcoin::blockdata::{
 use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
-use bitcoin::util::psbt::serialize::Serialize;
 use byteorder::{BigEndian, ByteOrder};
 use sled::transaction::{abort, ConflictableTransactionError, TransactionError};
 use sled::Transactional;
@@ -26,6 +25,13 @@ const BUNDLE_HASH_TO_INPUTS: &[u8] = b"bundle_hash_to_inputs";
 const FAILED_BUNDLE_HASHES: &[u8] = b"failed_bundle_hashes";
 const SPENT_BUNDLE_HASHES: &[u8] = b"spent_bundle_hashes";
 
+const VALUES: &[u8] = b"values";
+
+// Current block height.
+const BLOCK_HEIGHT: &[u8] = b"block_height";
+// Height at which last bundle has either failed or been spent.
+const LAST_FAILED_BUNDLE_HEIGHT: &[u8] = b"last_failed_bundle_height";
+
 pub struct DB {
     db: sled::Db,
     deposits: sled::Tree,
@@ -39,6 +45,11 @@ pub struct DB {
     // Failed and spent bundle hashes that we have already seen.
     failed_bundle_hashes: sled::Tree,
     spent_bundle_hashes: sled::Tree,
+
+    // Store for values like:
+    // block_height
+    // last_failed_bundle_height
+    values: sled::Tree,
 }
 
 impl DB {
@@ -82,6 +93,10 @@ impl DB {
             .open_tree(SPENT_BUNDLE_HASHES)
             .expect("couldn't open spent bundle hashes key value store");
 
+        let values = db
+            .open_tree(VALUES)
+            .expect("couldn't open values key value store");
+
         DB {
             db,
             deposits,
@@ -93,6 +108,7 @@ impl DB {
             bundle_hash_to_inputs,
             failed_bundle_hashes,
             spent_bundle_hashes,
+            values,
         }
     }
 
@@ -150,11 +166,28 @@ impl DB {
     }
 
     pub fn connect_withdrawals(&mut self, withdrawals: HashMap<Vec<u8>, WithdrawalOutput>) -> bool {
-        (&self.outpoint_to_withdrawal, &self.unspent_outpoints)
-            .transaction(|(outpoint_to_withdrawal, unspent_outpoints)| {
+        (
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.values,
+        )
+            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, values)| {
+                let height = match values.get(BLOCK_HEIGHT)? {
+                    Some(bytes) => {
+                        let array: [u8; 8] = bytes.as_ref().try_into().unwrap();
+                        u64::from_be_bytes(array)
+                    }
+                    None => 0,
+                };
+                let height = height + 1;
+                values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
                 for (outpoint, withdrawal) in withdrawals.iter() {
                     dbg!(hex::encode(outpoint.as_slice()), &withdrawal);
                     let outpoint = outpoint.as_slice();
+                    let withdrawal = WithdrawalOutput {
+                        height,
+                        ..*withdrawal
+                    };
                     let withdrawal = bincode::serialize(&withdrawal).or_else(abort)?;
                     outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
                     unspent_outpoints.insert(outpoint, &[])?;
@@ -164,6 +197,7 @@ impl DB {
             .is_ok()
     }
 
+    // FIXME: Handle mainchain reorgs.
     // FIXME: It should be impossible to disconnect spent withdrawals if on
     // mainchain the bundle that spends the corresponding outpoints is not
     // disconnected as well.
@@ -172,16 +206,32 @@ impl DB {
     // have some minimum number of confirmations to make it harder to invalidate
     // the current bundle by reorging the sidechain independently of mainchain.
     pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> bool {
-        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
-            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
-                for outpoint in outpoints.iter() {
-                    let outpoint = outpoint.as_slice();
-                    outpoint_to_withdrawal.remove(outpoint)?;
-                    unspent_outpoints.remove(outpoint)?;
-                    spent_outpoints.remove(outpoint)?;
-                }
-                Ok(())
-            })
+        (
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+            &self.values,
+        )
+            .transaction(
+                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints, values)| {
+                    let height = match values.get(BLOCK_HEIGHT)? {
+                        Some(bytes) => {
+                            let array: [u8; 8] = bytes.as_ref().try_into().unwrap();
+                            u64::from_be_bytes(array)
+                        }
+                        None => return abort(DisconnectError::Genesis),
+                    };
+                    let height = height - 1;
+                    values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
+                    for outpoint in outpoints.iter() {
+                        let outpoint = outpoint.as_slice();
+                        outpoint_to_withdrawal.remove(outpoint)?;
+                        unspent_outpoints.remove(outpoint)?;
+                        spent_outpoints.remove(outpoint)?;
+                    }
+                    Ok(())
+                },
+            )
             .is_ok()
     }
 
@@ -441,43 +491,95 @@ impl DB {
 
     pub fn vote_bundle(&mut self, txid: &Txid) {
         let inputs = self.get_inputs(txid);
-        (&self.unspent_outpoints, &self.spent_outpoints).transaction(
-            |(unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
-                for input in inputs.iter() {
-                    unspent_outpoints.remove(input.as_slice())?;
-                    spent_outpoints.insert(input.as_slice(), &[])?;
-                }
-                Ok(())
-            },
-        ).expect("failed to mark voting bundle inputs as spent");
+        (
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+        )
+            .transaction(
+                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
+                    for input in inputs.iter() {
+                        let withdrawal = outpoint_to_withdrawal.get(input)?;
+                        if !withdrawal.is_some() {
+                            return abort("broadcasted invalid bundle");
+                        }
+                        unspent_outpoints.remove(input.as_slice())?;
+                        spent_outpoints.insert(input.as_slice(), &[])?;
+                    }
+                    Ok(())
+                },
+            )
+            .expect("failed to mark voting bundle inputs as spent");
     }
 
     pub fn spend_bundle(&mut self, txid: &Txid) {
         let inputs = self.get_inputs(txid);
-        (&self.spent_bundle_hashes, &self.unspent_outpoints, &self.spent_outpoints).transaction(
-            |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
-                spent_bundle_hashes.insert(txid.as_inner(), &[])?;
-                for input in inputs.iter() {
-                    unspent_outpoints.remove(input.as_slice())?;
-                    spent_outpoints.insert(input.as_slice(), &[])?;
-                }
-                Ok(())
-            },
-        ).expect("failed to mark bundle as spent");
+        (
+            &self.spent_bundle_hashes,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+        )
+            .transaction(
+                |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
+                    spent_bundle_hashes.insert(txid.as_inner(), &[])?;
+                    for input in inputs.iter() {
+                        unspent_outpoints.remove(input.as_slice())?;
+                        spent_outpoints.insert(input.as_slice(), &[])?;
+                    }
+                    Ok(())
+                },
+            )
+            .expect("failed to mark bundle as spent");
     }
 
     pub fn fail_bundle(&mut self, txid: &Txid) {
         let inputs = self.get_inputs(txid);
-        (&self.failed_bundle_hashes, &self.unspent_outpoints, &self.spent_outpoints).transaction(
-            |(failed_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<(), ()> {
-                failed_bundle_hashes.insert(txid.as_inner(), &[])?;
-                for input in inputs.iter() {
-                    spent_outpoints.remove(input.as_slice())?;
-                    unspent_outpoints.insert(input.as_slice(), &[])?;
-                }
-                Ok(())
-            },
-        ).expect("failed to mark bundle as failed");
+        (
+            &self.failed_bundle_hashes,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+            &self.values,
+        )
+            .transaction(
+                |(failed_bundle_hashes, unspent_outpoints, spent_outpoints, values)| {
+                    failed_bundle_hashes.insert(txid.as_inner(), &[])?;
+                    for input in inputs.iter() {
+                        spent_outpoints.remove(input.as_slice())?;
+                        unspent_outpoints.insert(input.as_slice(), &[])?;
+                    }
+                    let last_failed_bundle_height = match values.get(BLOCK_HEIGHT)? {
+                        Some(height) => height,
+                        None => return abort("failed to get current block height"),
+                    };
+                    values.insert(LAST_FAILED_BUNDLE_HEIGHT, last_failed_bundle_height)?;
+                    Ok(())
+                },
+            )
+            .expect("failed to mark bundle as failed");
+    }
+
+    pub fn get_blocks_since_last_failed_bundle(&self) -> usize {
+        let block_height = match self
+            .values
+            .get(BLOCK_HEIGHT)
+            .expect("failed to get block height")
+        {
+            Some(block_height) => BigEndian::read_u64(&block_height) as usize,
+            // No block height set means we are at genesis block.
+            None => 0,
+        };
+        let last_failed_bundle_height = match self
+            .values
+            .get(LAST_FAILED_BUNDLE_HEIGHT)
+            .expect("failed to get last failed bundle height")
+        {
+            Some(last_failed_bundle_height) => {
+                BigEndian::read_u64(&last_failed_bundle_height) as usize
+            }
+            // If there were no bundles then last bundle height is 0.
+            None => 0,
+        };
+        block_height - last_failed_bundle_height
     }
 
     pub fn get_spent_bundle_hashes(&self) -> HashSet<Txid> {
@@ -525,34 +627,42 @@ impl DB {
         });
 
         // Aggregate all outputs by destination.
-        // destination -> (amount, mainchain fee)
-        let mut dest_to_withdrawal = HashMap::<[u8; 20], (u64, u64)>::new();
+        // destination -> (amount, mainchain fee, height)
+        let mut dest_to_withdrawal = HashMap::<[u8; 20], (u64, u64, u64)>::new();
         let mut outpoints = vec![];
         for withdrawal in withdrawals {
             let (outpoint, output) = withdrawal;
             outpoints.push(outpoint);
-            let (amount, mainchain_fee) = dest_to_withdrawal.entry(output.dest).or_insert((0, 0));
+            let (amount, mainchain_fee, height) =
+                dest_to_withdrawal.entry(output.dest).or_insert((0, 0, 0));
             // Add up all amounts.
             *amount += output.amount;
             // Set the maximum mainchain fee.
             *mainchain_fee = std::cmp::max(*mainchain_fee, output.mainchain_fee);
+            // Height is only used for sorting so at this point it doesn't
+            // matter, but we set it to the lowest one anyway just to have a
+            // reasonable value for WithdrawalOutput::height later.
+            *height = std::cmp::min(*height, output.height);
         }
-        // HashMap used for aggregation into a vector.
+        // We iterate over our HashMap with aggregated (amount, fee, height)
+        // tripples and convert it into a vector of WithdrawalOutputs.
         let mut outputs: Vec<WithdrawalOutput> = dest_to_withdrawal
             .into_iter()
-            .map(|(dest, (amount, mainchain_fee))| WithdrawalOutput {
+            .map(|(dest, (amount, mainchain_fee, height))| WithdrawalOutput {
                 dest,
                 amount,
                 mainchain_fee,
+                height,
             })
             .collect();
-        // Sort the outputs in descending order.
+        // Don't create an empty bundle.
+        if outputs.is_empty() {
+            return None;
+        }
+        // Sort the outputs in descending order from best to worst.
         //
-        // Outputs are sorted first by mainchain_fee, then by dest, and then by
-        // amount (see Ord implementation in withdrawal.rs).
-        //
-        // Because there are no outputs with repeating dest in this vector,
-        // amount will never affect the order only mainchain_fee and dest.
+        // See documentation for Ord trait implemenation of WithdrawalOutput for
+        // explanation of how we compare outputs.
         outputs.sort_by_key(|a| std::cmp::Reverse(*a));
         let mut fee = 0;
         let mut bundle_outputs = vec![];
@@ -630,6 +740,7 @@ enum ConnectError {
 enum DisconnectError {
     Bincode(bincode::Error),
     JustChecking,
+    Genesis,
 }
 
 impl From<bincode::Error> for ConnectError {
