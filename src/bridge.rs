@@ -42,6 +42,8 @@ mod ffi {
 
         fn connect_withdrawals(&mut self, withdrawals: Vec<Withdrawal>) -> bool;
         fn disconnect_withdrawals(&mut self, outpoints: Vec<String>) -> bool;
+        fn connect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool;
+        fn disconnect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool;
         fn attempt_bundle_broadcast(&mut self);
         fn is_outpoint_spent(&self, outpoint: String) -> bool;
         fn connect_deposit_outputs(&mut self, outputs: Vec<Output>, just_check: bool) -> bool;
@@ -195,6 +197,22 @@ impl Drivechain {
             .map(|o| hex::decode(o).unwrap().to_vec())
             .collect();
         self.0.db.disconnect_withdrawals(outpoints)
+    }
+
+    fn connect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool {
+        let refund_outpoints = refund_outpoints
+            .iter()
+            .map(|r| hex::decode(r).unwrap().to_vec())
+            .collect();
+        self.0.db.connect_refunds(refund_outpoints)
+    }
+
+    fn disconnect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool {
+        let refund_outpoints = refund_outpoints
+            .iter()
+            .map(|r| hex::decode(r).unwrap().to_vec())
+            .collect();
+        self.0.db.disconnect_refunds(refund_outpoints)
     }
 
     fn attempt_bundle_broadcast(&mut self) {

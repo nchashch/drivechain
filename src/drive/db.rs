@@ -235,6 +235,40 @@ impl DB {
             .is_ok()
     }
 
+    pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> bool {
+        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
+            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
+                for outpoint in refund_outpoints.iter() {
+                    let outpoint = outpoint.as_slice();
+                    if outpoint_to_withdrawal.get(outpoint)?.is_none() {
+                        continue;
+                    }
+                    if unspent_outpoints.remove(outpoint)?.is_some() {
+                        spent_outpoints.insert(outpoint, &[])?;
+                    }
+                }
+                Ok(())
+            })
+            .is_ok()
+    }
+
+    pub fn disconnect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> bool {
+        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
+            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
+                for outpoint in refund_outpoints.iter() {
+                    let outpoint = outpoint.as_slice();
+                    if outpoint_to_withdrawal.get(outpoint)?.is_none() {
+                        continue;
+                    }
+                    if spent_outpoints.remove(outpoint)?.is_some() {
+                        unspent_outpoints.insert(outpoint, &[])?;
+                    }
+                }
+                Ok(())
+            })
+            .is_ok()
+    }
+
     pub fn connect_deposit_outputs(
         &mut self,
         outputs: impl Iterator<Item = Output>,
