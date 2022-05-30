@@ -56,12 +56,12 @@ impl Drivechain {
         let prev_main_block_hash = self
             .client
             .get_mainchain_tip()
-            .expect("failed to get mainchain tip");
+            .expect("failed to get mainchain tip")
+            .expect("no mainchain tip");
         let coinbase_data = CoinbaseData {
             prev_main_block_hash,
             prev_side_block_hash,
         };
-        let bytes = coinbase_data.serialize();
         coinbase_data
     }
 
@@ -75,11 +75,13 @@ impl Drivechain {
         let mainchain_tip_hash = self
             .client
             .get_mainchain_tip()
-            .expect("failed to get mainchain tip");
+            .expect("failed to get mainchain tip")
+            .expect("no mainchain tip");
         // Create a BMM request.
         let txid = self
             .client
-            .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount);
+            .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount)
+            .unwrap();
         let bmm_request = BMMRequest {
             txid: txid,
             critical_hash: *critical_hash,
@@ -94,7 +96,8 @@ impl Drivechain {
         let mainchain_tip_hash = self
             .client
             .get_mainchain_tip()
-            .expect("failed to get mainchain tip");
+            .expect("failed to get mainchain tip")
+            .expect("no mainchain tip");
         if self.bmm_cache.prev_main_block_hash == mainchain_tip_hash {
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
@@ -106,7 +109,7 @@ impl Drivechain {
         // and delete all requests with drain method.
         for request in self.bmm_cache.requests.drain(..) {
             // We check if our request was included in a mainchain block.
-            if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid) {
+            if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid).unwrap() {
                 // And we check that critical_hash was actually included in
                 // coinbase on mainchain.
                 if let Ok(verified) = self
@@ -140,7 +143,7 @@ impl Drivechain {
             .get_last_deposit()
             .map(|(_, last_deposit)| last_deposit);
         while !last_deposit.clone().map_or(true, |last_deposit| {
-            self.client.verify_deposit(&last_deposit)
+            self.client.verify_deposit(&last_deposit).unwrap()
         }) {
             self.db.remove_last_deposit();
             last_deposit = self
@@ -149,24 +152,24 @@ impl Drivechain {
                 .map(|(_, last_deposit)| last_deposit);
         }
         let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
-        let deposits = self.client.get_deposits(last_output);
+        let deposits = self.client.get_deposits(last_output).unwrap();
         self.db.update_deposits(deposits.as_slice());
     }
 
     fn update_bundles(&mut self) {
         let known_failed = self.db.get_failed_bundle_hashes();
-        let failed = self.client.get_failed_withdrawal_bundle_hashes();
+        let failed = self.client.get_failed_withdrawal_bundle_hashes().unwrap();
         let failed = failed.difference(&known_failed);
         for txid in failed {
             self.db.fail_bundle(txid);
         }
         let known_spent = self.db.get_spent_bundle_hashes();
-        let spent = self.client.get_spent_withdrawal_bundle_hashes();
+        let spent = self.client.get_spent_withdrawal_bundle_hashes().unwrap();
         let spent = spent.difference(&known_spent);
         for txid in spent {
             self.db.spend_bundle(txid);
         }
-        let voting = self.client.get_voting_withdrawal_bundle_hashes();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
         for txid in voting {
             self.db.vote_bundle(&txid);
         }
@@ -207,7 +210,7 @@ impl Drivechain {
             println!("last faild bundle was too soon");
             return;
         }
-        let voting = self.client.get_voting_withdrawal_bundle_hashes();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
         // If a bundle is already being voted on we don't need to broadcast a
         // new one.
         if !voting.is_empty() {
@@ -237,9 +240,9 @@ impl Drivechain {
     }
 
     pub fn get_bundle_status(&self, txid: &Txid) -> BundleStatus {
-        let voting = self.client.get_voting_withdrawal_bundle_hashes();
-        let failed = self.client.get_failed_withdrawal_bundle_hashes();
-        let spent = self.client.get_spent_withdrawal_bundle_hashes();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
+        let failed = self.client.get_failed_withdrawal_bundle_hashes().unwrap();
+        let spent = self.client.get_spent_withdrawal_bundle_hashes().unwrap();
         if voting.contains(txid) {
             BundleStatus::Voting
         } else if failed.contains(txid) {

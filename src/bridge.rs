@@ -2,7 +2,6 @@ use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
 use bitcoin::util::address::{Address, Payload};
-use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -140,11 +139,12 @@ impl Drivechain {
             return false;
         }
         let main_block_hash = BlockHash::from_str(main_block_hash).unwrap();
-        let critical_hash = TxMerkleNode::from_str(critical_hash).unwrap();
         let coinbase_data = hex::decode(coinbase_data).unwrap();
         let coinbase_data = drive::CoinbaseData::deserialize(&coinbase_data).unwrap();
 
-        if let Some(prev_main_block_hash) = self.0.client.get_prev_block_hash(&main_block_hash) {
+        if let Some(prev_main_block_hash) =
+            self.0.client.get_prev_block_hash(&main_block_hash).unwrap()
+        {
             if prev_main_block_hash != coinbase_data.prev_main_block_hash {
                 return false;
             }
@@ -247,17 +247,4 @@ impl Drivechain {
     fn flush(&mut self) -> bool {
         self.0.db.flush().is_ok()
     }
-}
-
-fn aggregate_outputs<'a>(
-    outputs_vec: impl Iterator<Item = &'a ffi::Output>,
-) -> HashMap<String, Amount> {
-    let mut outputs = HashMap::<String, Amount>::new();
-    for output in outputs_vec {
-        let amount = outputs
-            .entry(output.address.clone())
-            .or_insert(Amount::ZERO);
-        *amount += Amount::from_sat(output.amount);
-    }
-    outputs
 }

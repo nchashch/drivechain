@@ -3,7 +3,7 @@ use super::withdrawal::WithdrawalOutput;
 use bitcoin::blockdata::transaction::OutPoint;
 use bitcoin::blockdata::{
     opcodes, script,
-    transaction::{Transaction, TxIn, TxOut},
+    transaction::{TxIn, TxOut},
 };
 use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
@@ -235,6 +235,8 @@ impl DB {
             .is_ok()
     }
 
+    // FIXME: Add separate refunded_outpoints store to allow checking spent
+    // bundle validity.
     pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> bool {
         (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
             .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
