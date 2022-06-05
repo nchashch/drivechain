@@ -11,7 +11,6 @@ pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
 use std::collections::HashMap;
 pub use withdrawal::WithdrawalOutput;
-use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct Block {
@@ -218,9 +217,6 @@ impl Drivechain {
             Some(bundle) => bundle,
             None => return,
         };
-        dbg!(self.client.get_failed_withdrawal_bundle_hashes());
-        dbg!(self.client.get_spent_withdrawal_bundle_hashes());
-        dbg!(self.client.get_voting_withdrawal_bundle_hashes());
         dbg!(
             &bundle,
             bundle.txid(),
