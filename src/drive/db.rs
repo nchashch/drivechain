@@ -651,7 +651,7 @@ impl DB {
                 bincode::deserialize::<Vec<Vec<u8>>>(&inputs)
                     .expect("failed to deserialize bundle inputs")
             })
-            .unwrap_or(vec![])
+            .unwrap_or_default()
     }
 
     pub fn create_bundle(&mut self) -> Option<bitcoin::Transaction> {

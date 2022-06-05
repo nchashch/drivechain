@@ -46,7 +46,7 @@ impl Drivechain {
         };
 
         Drivechain {
-            client: client,
+            client,
             bmm_cache: BMMCache::new(),
             db: db::DB::new(db_path),
         }
@@ -58,11 +58,10 @@ impl Drivechain {
             .get_mainchain_tip()
             .expect("failed to get mainchain tip")
             .expect("no mainchain tip");
-        let coinbase_data = CoinbaseData {
+        CoinbaseData {
             prev_main_block_hash,
             prev_side_block_hash,
-        };
-        coinbase_data
+        }
     }
 
     // Attempts to blind merge mine a block.
