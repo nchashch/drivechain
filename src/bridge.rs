@@ -30,7 +30,6 @@ mod ffi {
         fn new_drivechain(
             db_path: &str,
             this_sidechain: usize,
-            key_hash: &str,
             rpcuser: &str,
             rpcpassword: &str,
         ) -> Box<Drivechain>;
@@ -66,14 +65,12 @@ pub struct Drivechain(drive::Drivechain);
 fn new_drivechain(
     db_path: &str,
     this_sidechain: usize,
-    key_hash: &str,
     rpcuser: &str,
     rpcpassword: &str,
 ) -> Box<Drivechain> {
     let drivechain = drive::Drivechain::new(
         db_path,
         this_sidechain,
-        key_hash.into(),
         rpcuser.into(),
         rpcpassword.into(),
     );

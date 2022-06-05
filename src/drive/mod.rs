@@ -11,6 +11,7 @@ pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
 use std::collections::HashMap;
 pub use withdrawal::WithdrawalOutput;
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct Block {
@@ -29,7 +30,6 @@ impl Drivechain {
     pub fn new<P: AsRef<std::path::Path>>(
         db_path: P,
         this_sidechain: usize,
-        key_hash: String,
         rpcuser: String,
         rpcpassword: String,
     ) -> Drivechain {
@@ -38,7 +38,6 @@ impl Drivechain {
 
         let client = DrivechainClient {
             this_sidechain,
-            key_hash,
             host: LOCALHOST.into(),
             port: MAINCHAIN_PORT,
             rpcuser,

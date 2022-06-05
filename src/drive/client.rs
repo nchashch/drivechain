@@ -14,7 +14,6 @@ use bitcoin::util::psbt::serialize::Serialize;
 
 pub struct DrivechainClient {
     pub this_sidechain: usize,
-    pub key_hash: String,
     pub host: String,
     pub port: usize,
     pub rpcuser: String,
@@ -189,6 +188,7 @@ impl DrivechainClient {
         let params = vec![
             json!(main_block_hash.to_string()),
             json!(critical_hash.to_string()),
+            json!(self.this_sidechain),
         ];
         self.send_request("verifybmm", &params)
             .map(|value| {
@@ -234,7 +234,7 @@ impl DrivechainClient {
             json!(height),
             json!(critical_hash.to_string()),
             json!(self.this_sidechain),
-            json!(str_hash_prev[str_hash_prev.len() - 4..]),
+            json!(str_hash_prev[str_hash_prev.len() - 8..]),
         ];
         self.send_request("createbmmcriticaldatatx", &params)
             .map(|value| {
@@ -353,11 +353,11 @@ impl DrivechainClient {
     pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<Deposit>, Error> {
         let params = match last_deposit {
             Some((txid, nburnindex)) => vec![
-                json!(self.key_hash),
+                json!(self.this_sidechain),
                 json!(txid.to_string()),
                 json!(nburnindex),
             ],
-            None => vec![json!(self.key_hash)],
+            None => vec![json!(self.this_sidechain)],
         };
         self.send_request("listsidechaindeposits", &params)
             .map(|value| {
@@ -416,6 +416,13 @@ impl DrivechainClient {
                 result
             })
             .unwrap_or_else(Err)
+            // FIXME: Right now mainchain returns an error if there are no
+            // deposits in it's db instead of an empty array, so we have to make
+            // this exception here.
+            .or_else(|err| match err {
+                Error::Ureq(_) => Ok(vec![]),
+                err => Err(err),
+            })
     }
 
     pub fn verify_deposit(&self, deposit: &Deposit) -> Result<bool, Error> {
@@ -506,6 +513,10 @@ impl DrivechainClient {
                 None => Err(Error::JsonSchema),
             })
             .unwrap_or_else(Err)
+            .or_else(|err| match err {
+                Error::Ureq(_) => Ok(HashSet::new()),
+                err => Err(err),
+            })
     }
 
     pub fn get_spent_withdrawal_bundle_hashes(&self) -> Result<HashSet<Txid>, Error> {
@@ -525,6 +536,10 @@ impl DrivechainClient {
                 None => Err(Error::JsonSchema),
             })
             .unwrap_or_else(Err)
+            .or_else(|err| match err {
+                Error::Ureq(_) => Ok(HashSet::new()),
+                err => Err(err),
+            })
     }
 
     pub fn get_voting_withdrawal_bundle_hashes(&self) -> Result<HashSet<Txid>, Error> {
@@ -544,6 +559,10 @@ impl DrivechainClient {
                 None => Err(Error::JsonSchema),
             })
             .unwrap_or_else(Err)
+            .or_else(|err| match err {
+                Error::Ureq(_) => Ok(HashSet::new()),
+                err => Err(err),
+            })
     }
 
     fn collect_nsidechain_txid_pairs(
