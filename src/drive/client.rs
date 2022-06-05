@@ -26,97 +26,30 @@ pub struct VerifiedBMM {
     pub txid: Txid,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ParseError {
-    Bitcoin(bitcoin::consensus::encode::Error),
-    Int(std::num::ParseIntError),
-    Hex(hex::FromHexError),
-    BitcoinHex(bitcoin::hashes::hex::Error),
+    #[error("bitcoin parse error")]
+    Bitcoin(#[from] bitcoin::consensus::encode::Error),
+    #[error("int parse error")]
+    Int(#[from] std::num::ParseIntError),
+    #[error("hex parse error")]
+    Hex(#[from] hex::FromHexError),
+    #[error("bitcoin hex parse error")]
+    BitcoinHex(#[from] bitcoin::hashes::hex::Error),
 }
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseError::Bitcoin(_) => write!(f, "Bitcoin parse error"),
-            ParseError::Int(_) => write!(f, "Int parse error"),
-            ParseError::Hex(_) => write!(f, "Hex parse error"),
-            ParseError::BitcoinHex(_) => write!(f, "BitcoinHex parse error"),
-        }
-    }
-}
-
-impl From<bitcoin::consensus::encode::Error> for ParseError {
-    fn from(error: bitcoin::consensus::encode::Error) -> ParseError {
-        ParseError::Bitcoin(error)
-    }
-}
-
-impl From<std::num::ParseIntError> for ParseError {
-    fn from(error: std::num::ParseIntError) -> ParseError {
-        ParseError::Int(error)
-    }
-}
-
-impl From<hex::FromHexError> for ParseError {
-    fn from(error: hex::FromHexError) -> ParseError {
-        ParseError::Hex(error)
-    }
-}
-
-impl From<bitcoin::hashes::hex::Error> for ParseError {
-    fn from(error: bitcoin::hashes::hex::Error) -> ParseError {
-        ParseError::BitcoinHex(error)
-    }
-}
-
-impl std::error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ParseError::Bitcoin(err) => Some(err),
-            ParseError::Int(err) => Some(err),
-            ParseError::Hex(err) => Some(err),
-            ParseError::BitcoinHex(err) => Some(err),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
-    Io(std::io::Error),
-    Ureq(ureq::Error),
-    Parse(ParseError),
+    #[error("json parse error")]
+    Io(#[from] std::io::Error),
+    #[error("ureq error")]
+    Ureq(#[from] ureq::Error),
+    #[error("parse error")]
+    Parse(#[from] ParseError),
+    #[error("rpc error: `{0}`")]
     Rpc(String),
+    #[error("json schema error")]
     JsonSchema,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Io(_) => write!(f, "JSON parse error"),
-            Error::Ureq(_) => write!(f, "ureq error"),
-            Error::Parse(_) => write!(f, "Parse error"),
-            Error::Rpc(_) => write!(f, "RPC error"),
-            Error::JsonSchema => write!(f, "JSON schema mismatch error"),
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Error {
-        Error::Io(error)
-    }
-}
-
-impl From<ureq::Error> for Error {
-    fn from(error: ureq::Error) -> Error {
-        Error::Ureq(error)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(error: &str) -> Error {
-        Error::Rpc(error.into())
-    }
 }
 
 impl From<String> for Error {
@@ -125,21 +58,9 @@ impl From<String> for Error {
     }
 }
 
-impl From<ParseError> for Error {
-    fn from(error: ParseError) -> Error {
-        Error::Parse(error)
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(err) => Some(err),
-            Error::Ureq(err) => Some(err),
-            Error::Parse(err) => Some(err),
-            Error::Rpc(_) => None,
-            Error::JsonSchema => None,
-        }
+impl From<&str> for Error {
+    fn from(error: &str) -> Error {
+        Error::Rpc(error.into())
     }
 }
 
@@ -566,10 +487,10 @@ impl DrivechainClient {
     }
 
     fn collect_nsidechain_txid_pairs(
-        array: &Vec<ureq::serde_json::Value>,
+        array: &[ureq::serde_json::Value],
     ) -> Result<Vec<(usize, Txid)>, Error> {
         array
-            .into_iter()
+            .iter()
             .map(|v| {
                 let nsidechain = match v["nsidechain"].as_u64() {
                     Some(nsidechain) => nsidechain as usize,
