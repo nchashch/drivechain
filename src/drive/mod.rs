@@ -46,7 +46,7 @@ impl Drivechain {
         Drivechain {
             client,
             bmm_cache: BMMCache::new(),
-            db: db::DB::new(db_path),
+            db: db::DB::new(db_path).unwrap(),
         }
     }
 
@@ -138,37 +138,39 @@ impl Drivechain {
         let mut last_deposit = self
             .db
             .get_last_deposit()
+            .unwrap()
             .map(|(_, last_deposit)| last_deposit);
         while !last_deposit.clone().map_or(true, |last_deposit| {
             self.client.verify_deposit(&last_deposit).unwrap()
         }) {
-            self.db.remove_last_deposit();
+            self.db.remove_last_deposit().unwrap();
             last_deposit = self
                 .db
                 .get_last_deposit()
+                .unwrap()
                 .map(|(_, last_deposit)| last_deposit);
         }
         let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
         let deposits = self.client.get_deposits(last_output).unwrap();
-        self.db.update_deposits(deposits.as_slice());
+        self.db.update_deposits(deposits.as_slice()).unwrap();
     }
 
     fn update_bundles(&mut self) {
-        let known_failed = self.db.get_failed_bundle_hashes();
+        let known_failed = self.db.get_failed_bundle_hashes().unwrap();
         let failed = self.client.get_failed_withdrawal_bundle_hashes().unwrap();
         let failed = failed.difference(&known_failed);
         for txid in failed {
-            self.db.fail_bundle(txid);
+            self.db.fail_bundle(txid).unwrap();
         }
-        let known_spent = self.db.get_spent_bundle_hashes();
+        let known_spent = self.db.get_spent_bundle_hashes().unwrap();
         let spent = self.client.get_spent_withdrawal_bundle_hashes().unwrap();
         let spent = spent.difference(&known_spent);
         for txid in spent {
-            self.db.spend_bundle(txid);
+            self.db.spend_bundle(txid).unwrap();
         }
         let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
         for txid in voting {
-            self.db.vote_bundle(&txid);
+            self.db.vote_bundle(&txid).unwrap();
         }
     }
 
@@ -202,7 +204,8 @@ impl Drivechain {
         //
         // FIXME: Make this value different for regtest/testnet/mainnet.
         const BUNDLE_WAIT_PERIOD: usize = 5;
-        let blocks_since_last_failed_bundle = self.db.get_blocks_since_last_failed_bundle();
+        let blocks_since_last_failed_bundle =
+            self.db.get_blocks_since_last_failed_bundle().unwrap();
         if blocks_since_last_failed_bundle < BUNDLE_WAIT_PERIOD {
             println!("last faild bundle was too soon");
             return;
@@ -213,7 +216,7 @@ impl Drivechain {
         if !voting.is_empty() {
             return;
         }
-        let bundle = match self.db.create_bundle() {
+        let bundle = match self.db.create_bundle().unwrap() {
             Some(bundle) => bundle,
             None => return,
         };
@@ -229,7 +232,7 @@ impl Drivechain {
             self.client
                 .broadcast_withdrawal_bundle(&bundle)
                 .expect("failed to broadcast bundle");
-            self.db.vote_bundle(&bundle.txid());
+            self.db.vote_bundle(&bundle.txid()).unwrap();
         }
     }
 

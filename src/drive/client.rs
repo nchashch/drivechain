@@ -1,14 +1,12 @@
+use crate::drive::deposit::Deposit;
 use base64::encode;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
 use bitcoin::util::psbt::serialize::Deserialize;
-use ureq::json;
-
 use std::collections::HashSet;
-
-use crate::drive::deposit::Deposit;
 use std::str::FromStr;
+use ureq::json;
 
 use bitcoin::util::psbt::serialize::Serialize;
 
@@ -24,44 +22,6 @@ pub struct DrivechainClient {
 pub struct VerifiedBMM {
     pub time: i64,
     pub txid: Txid,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum ParseError {
-    #[error("bitcoin parse error")]
-    Bitcoin(#[from] bitcoin::consensus::encode::Error),
-    #[error("int parse error")]
-    Int(#[from] std::num::ParseIntError),
-    #[error("hex parse error")]
-    Hex(#[from] hex::FromHexError),
-    #[error("bitcoin hex parse error")]
-    BitcoinHex(#[from] bitcoin::hashes::hex::Error),
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("json parse error")]
-    Io(#[from] std::io::Error),
-    #[error("ureq error")]
-    Ureq(#[from] ureq::Error),
-    #[error("parse error")]
-    Parse(#[from] ParseError),
-    #[error("rpc error: `{0}`")]
-    Rpc(String),
-    #[error("json schema error")]
-    JsonSchema,
-}
-
-impl From<String> for Error {
-    fn from(error: String) -> Error {
-        Error::Rpc(error)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(error: &str) -> Error {
-        Error::Rpc(error.into())
-    }
 }
 
 impl DrivechainClient {
@@ -507,5 +467,43 @@ impl DrivechainClient {
                 Ok((nsidechain, txid))
             })
             .collect::<Result<Vec<(usize, Txid)>, Error>>()
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ParseError {
+    #[error("bitcoin parse error")]
+    Bitcoin(#[from] bitcoin::consensus::encode::Error),
+    #[error("int parse error")]
+    Int(#[from] std::num::ParseIntError),
+    #[error("hex parse error")]
+    Hex(#[from] hex::FromHexError),
+    #[error("bitcoin hex parse error")]
+    BitcoinHex(#[from] bitcoin::hashes::hex::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("json parse error")]
+    Io(#[from] std::io::Error),
+    #[error("ureq error")]
+    Ureq(#[from] ureq::Error),
+    #[error("parse error")]
+    Parse(#[from] ParseError),
+    #[error("rpc error: `{0}`")]
+    Rpc(String),
+    #[error("json schema error")]
+    JsonSchema,
+}
+
+impl From<String> for Error {
+    fn from(error: String) -> Error {
+        Error::Rpc(error)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(error: &str) -> Error {
+        Error::Rpc(error.into())
     }
 }

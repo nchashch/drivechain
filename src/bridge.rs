@@ -68,12 +68,8 @@ fn new_drivechain(
     rpcuser: &str,
     rpcpassword: &str,
 ) -> Box<Drivechain> {
-    let drivechain = drive::Drivechain::new(
-        db_path,
-        this_sidechain,
-        rpcuser.into(),
-        rpcpassword.into(),
-    );
+    let drivechain =
+        drive::Drivechain::new(db_path, this_sidechain, rpcuser.into(), rpcpassword.into());
     Box::new(Drivechain(drivechain))
 }
 
@@ -156,6 +152,7 @@ impl Drivechain {
         self.0
             .db
             .get_deposit_outputs()
+            .unwrap()
             .iter()
             .map(|output| ffi::Output {
                 address: output.address.clone(),
@@ -185,7 +182,7 @@ impl Drivechain {
                 )
             })
             .collect();
-        self.0.db.connect_withdrawals(withdrawals)
+        self.0.db.connect_withdrawals(withdrawals).is_ok()
     }
 
     fn disconnect_withdrawals(&mut self, outpoints: Vec<String>) -> bool {
@@ -193,7 +190,7 @@ impl Drivechain {
             .iter()
             .map(|o| hex::decode(o).unwrap().to_vec())
             .collect();
-        self.0.db.disconnect_withdrawals(outpoints)
+        self.0.db.disconnect_withdrawals(outpoints).is_ok()
     }
 
     fn connect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool {
@@ -201,7 +198,7 @@ impl Drivechain {
             .iter()
             .map(|r| hex::decode(r).unwrap().to_vec())
             .collect();
-        self.0.db.connect_refunds(refund_outpoints)
+        self.0.db.connect_refunds(refund_outpoints).is_ok()
     }
 
     fn disconnect_refunds(&mut self, refund_outpoints: Vec<String>) -> bool {
@@ -209,7 +206,7 @@ impl Drivechain {
             .iter()
             .map(|r| hex::decode(r).unwrap().to_vec())
             .collect();
-        self.0.db.disconnect_refunds(refund_outpoints)
+        self.0.db.disconnect_refunds(refund_outpoints).is_ok()
     }
 
     fn attempt_bundle_broadcast(&mut self) {
@@ -218,7 +215,7 @@ impl Drivechain {
 
     fn is_outpoint_spent(&self, outpoint: String) -> bool {
         let outpoint = hex::decode(outpoint).unwrap();
-        self.0.db.is_outpoint_spent(outpoint)
+        self.0.db.is_outpoint_spent(outpoint).unwrap()
     }
 
     fn connect_deposit_outputs(&mut self, outputs: Vec<ffi::Output>, just_check: bool) -> bool {
@@ -226,7 +223,10 @@ impl Drivechain {
             address: output.address.clone(),
             amount: output.amount,
         });
-        self.0.db.connect_deposit_outputs(outputs, just_check)
+        self.0
+            .db
+            .connect_deposit_outputs(outputs, just_check)
+            .is_ok()
     }
 
     fn disconnect_deposit_outputs(&mut self, outputs: Vec<ffi::Output>, just_check: bool) -> bool {
@@ -234,7 +234,10 @@ impl Drivechain {
             address: output.address.clone(),
             amount: output.amount,
         });
-        self.0.db.disconnect_deposit_outputs(outputs, just_check)
+        self.0
+            .db
+            .disconnect_deposit_outputs(outputs, just_check)
+            .is_ok()
     }
 
     fn format_deposit_address(&self, address: &str) -> String {

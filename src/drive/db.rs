@@ -9,7 +9,7 @@ use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
-use sled::transaction::{abort, ConflictableTransactionError, TransactionError};
+use sled::transaction::{abort, TransactionError};
 use sled::Transactional;
 use std::collections::{HashMap, HashSet};
 
@@ -55,49 +55,21 @@ pub struct DB {
 impl DB {
     // Here panicking is appropriate becuase failing to open sidechain db is not
     // a recoverable error.
-    pub fn new<P: AsRef<std::path::Path>>(path: P) -> DB {
-        let db = sled::open(path).expect("couldn't open sled db");
-        let deposits = db
-            .open_tree(DEPOSITS)
-            .expect("couldn't open deposits key value store");
+    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<DB, Error> {
+        let db = sled::open(path)?;
+        let deposits = db.open_tree(DEPOSITS)?;
+        let deposit_balances = db.open_tree(DEPOSIT_BALANCES)?;
+        let unbalanced_deposits = db.open_tree(UNBALANCED_DEPOSITS)?;
+        let outpoint_to_withdrawal = db.open_tree(OUTPOINT_TO_WITHDRAWAL)?;
+        let spent_outpoints = db.open_tree(SPENT_OUTPOINTS)?;
+        let unspent_outpoints = db.open_tree(UNSPENT_OUTPOINTS)?;
+        let bundle_hash_to_inputs = db.open_tree(BUNDLE_HASH_TO_INPUTS)?;
+        let failed_bundle_hashes = db.open_tree(FAILED_BUNDLE_HASHES)?;
+        let spent_bundle_hashes = db.open_tree(SPENT_BUNDLE_HASHES)?;
 
-        let deposit_balances = db
-            .open_tree(DEPOSIT_BALANCES)
-            .expect("couldn't open deposit balances key value store");
+        let values = db.open_tree(VALUES)?;
 
-        let unbalanced_deposits = db
-            .open_tree(UNBALANCED_DEPOSITS)
-            .expect("couldn't open unbalanced deposits key value store");
-
-        let outpoint_to_withdrawal = db
-            .open_tree(OUTPOINT_TO_WITHDRAWAL)
-            .expect("couldn't open outpoint to withdrawal key value store");
-
-        let spent_outpoints = db
-            .open_tree(SPENT_OUTPOINTS)
-            .expect("couldn't open spent outpoints key value store");
-
-        let unspent_outpoints = db
-            .open_tree(UNSPENT_OUTPOINTS)
-            .expect("couldn't open unspent outpoints key value store");
-
-        let bundle_hash_to_inputs = db
-            .open_tree(BUNDLE_HASH_TO_INPUTS)
-            .expect("couldn't open bundle hash to inputs key value store");
-
-        let failed_bundle_hashes = db
-            .open_tree(FAILED_BUNDLE_HASHES)
-            .expect("couldn't open failed bundle hashes key value store");
-
-        let spent_bundle_hashes = db
-            .open_tree(SPENT_BUNDLE_HASHES)
-            .expect("couldn't open spent bundle hashes key value store");
-
-        let values = db
-            .open_tree(VALUES)
-            .expect("couldn't open values key value store");
-
-        DB {
+        Ok(DB {
             db,
             deposits,
             deposit_balances,
@@ -109,63 +81,35 @@ impl DB {
             failed_bundle_hashes,
             spent_bundle_hashes,
             values,
-        }
+        })
     }
 
-    pub fn flush(&mut self) -> Result<usize, sled::Error> {
-        self.db.flush()
+    pub fn flush(&mut self) -> Result<usize, Error> {
+        self.db.flush().map_err(|err| err.into())
     }
 
-    pub fn get_deposit_outputs(&self) -> Vec<Output> {
-        {
-            let withdrawals: HashMap<String, WithdrawalOutput> = self
-                .outpoint_to_withdrawal
-                .iter()
-                .map(|item| {
-                    let (outpoint, withdrawal) = item.unwrap();
-                    let outpoint = hex::encode(outpoint);
-                    let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal).unwrap();
-                    (outpoint, withdrawal)
-                })
-                .collect();
-            dbg!(withdrawals);
-            let deposit_balances: HashMap<String, (u64, u64)> = self
-                .deposit_balances
-                .iter()
-                .map(|item| {
-                    let (address, balance) = item.unwrap();
-                    let address = String::from_utf8(address.to_vec()).unwrap();
-                    let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
-                        .expect("failed to deserialize deposit balance");
-                    (address, (side_balance, main_balance))
-                })
-                .collect();
-            dbg!(deposit_balances);
-        }
-        let outs = self
-            .unbalanced_deposits
+    pub fn get_deposit_outputs(&self) -> Result<Vec<Output>, Error> {
+        self.unbalanced_deposits
             .iter()
             .map(|address| {
-                let (address, _) = address.expect("failed to get unbalanced deposit address");
-                let balance = self
-                    .deposit_balances
-                    .get(&address)
-                    .expect("failed to get balance")
-                    .expect("unbalanced output doesn't exist");
-                let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)
-                    .expect("failed to deserialize deposit balance");
-                Output {
-                    address: String::from_utf8(address.to_vec())
-                        .expect("failed to decode address string"),
+                let (address, _) = address?;
+                let balance = match self.deposit_balances.get(&address)? {
+                    Some(balance) => balance,
+                    None => return Err(Error::NoDeposit(String::from_utf8(address.to_vec())?)),
+                };
+                let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)?;
+                Ok(Output {
+                    address: String::from_utf8(address.to_vec())?,
                     amount: main_balance - side_balance,
-                }
+                })
             })
-            .collect();
-        dbg!(&outs);
-        outs
+            .collect()
     }
 
-    pub fn connect_withdrawals(&mut self, withdrawals: HashMap<Vec<u8>, WithdrawalOutput>) -> bool {
+    pub fn connect_withdrawals(
+        &mut self,
+        withdrawals: HashMap<Vec<u8>, WithdrawalOutput>,
+    ) -> Result<(), Error> {
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -174,7 +118,11 @@ impl DB {
             .transaction(|(outpoint_to_withdrawal, unspent_outpoints, values)| {
                 let height = match values.get(BLOCK_HEIGHT)? {
                     Some(bytes) => {
-                        let array: [u8; 8] = bytes.as_ref().try_into().unwrap();
+                        let array: [u8; 8] = bytes
+                            .as_ref()
+                            .try_into()
+                            .map_err(|err: std::array::TryFromSliceError| err.into())
+                            .or_else(abort)?;
                         u64::from_be_bytes(array)
                     }
                     None => 0,
@@ -188,13 +136,15 @@ impl DB {
                         height,
                         ..*withdrawal
                     };
-                    let withdrawal = bincode::serialize(&withdrawal).or_else(abort)?;
+                    let withdrawal = bincode::serialize(&withdrawal)
+                        .map_err(|err| err.into())
+                        .or_else(abort)?;
                     outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
                     unspent_outpoints.insert(outpoint, &[])?;
                 }
                 Ok(())
             })
-            .is_ok()
+            .map_err(|err: TransactionError<Error>| err.into())
     }
 
     // FIXME: Handle mainchain reorgs.
@@ -205,7 +155,7 @@ impl DB {
     // It might make sense to only create bundles from withdrawal outputs that
     // have some minimum number of confirmations to make it harder to invalidate
     // the current bundle by reorging the sidechain independently of mainchain.
-    pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> bool {
+    pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -216,10 +166,14 @@ impl DB {
                 |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints, values)| {
                     let height = match values.get(BLOCK_HEIGHT)? {
                         Some(bytes) => {
-                            let array: [u8; 8] = bytes.as_ref().try_into().unwrap();
+                            let array: [u8; 8] = bytes
+                                .as_ref()
+                                .try_into()
+                                .map_err(|err: std::array::TryFromSliceError| err.into())
+                                .or_else(abort)?;
                             u64::from_be_bytes(array)
                         }
-                        None => return abort(DisconnectError::Genesis),
+                        None => return abort(DisconnectError::Genesis.into()),
                     };
                     let height = height - 1;
                     values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
@@ -232,63 +186,85 @@ impl DB {
                     Ok(())
                 },
             )
-            .is_ok()
+            .map_err(|err: TransactionError<Error>| err.into())
     }
 
     // FIXME: Add separate refunded_outpoints store to allow checking spent
     // bundle validity.
-    pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> bool {
-        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
-            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
-                for outpoint in refund_outpoints.iter() {
-                    let outpoint = outpoint.as_slice();
-                    if outpoint_to_withdrawal.get(outpoint)?.is_none() {
-                        continue;
+    pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+        (
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+        )
+            .transaction(
+                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
+                    for outpoint in refund_outpoints.iter() {
+                        let outpoint = outpoint.as_slice();
+                        if outpoint_to_withdrawal.get(outpoint)?.is_none() {
+                            continue;
+                        }
+                        if unspent_outpoints.remove(outpoint)?.is_some() {
+                            spent_outpoints.insert(outpoint, &[])?;
+                        }
                     }
-                    if unspent_outpoints.remove(outpoint)?.is_some() {
-                        spent_outpoints.insert(outpoint, &[])?;
-                    }
-                }
-                Ok(())
+                    Ok(())
+                },
+            )
+            .or_else(|err: TransactionError| match err {
+                TransactionError::Storage(err) => Err(err.into()),
+                // NOTE: This transaction is never aborted, so this branch will
+                // never be evaluated.
+                TransactionError::Abort(_) => Ok(()),
             })
-            .is_ok()
     }
 
-    pub fn disconnect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> bool {
-        (&self.outpoint_to_withdrawal, &self.unspent_outpoints, &self.spent_outpoints)
-            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
-                for outpoint in refund_outpoints.iter() {
-                    let outpoint = outpoint.as_slice();
-                    if outpoint_to_withdrawal.get(outpoint)?.is_none() {
-                        continue;
+    pub fn disconnect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+        (
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+        )
+            .transaction(
+                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
+                    for outpoint in refund_outpoints.iter() {
+                        let outpoint = outpoint.as_slice();
+                        if outpoint_to_withdrawal.get(outpoint)?.is_none() {
+                            continue;
+                        }
+                        if spent_outpoints.remove(outpoint)?.is_some() {
+                            unspent_outpoints.insert(outpoint, &[])?;
+                        }
                     }
-                    if spent_outpoints.remove(outpoint)?.is_some() {
-                        unspent_outpoints.insert(outpoint, &[])?;
-                    }
-                }
-                Ok(())
+                    Ok(())
+                },
+            )
+            .or_else(|err: TransactionError| match err {
+                TransactionError::Storage(err) => Err(err.into()),
+                // NOTE: This transaction is never aborted, so this branch will
+                // never be evaluated.
+                TransactionError::Abort(_) => Ok(()),
             })
-            .is_ok()
     }
 
     pub fn connect_deposit_outputs(
         &mut self,
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
-    ) -> bool {
+    ) -> Result<(), Error> {
         println!("connect_deposit_outputs");
         let mut side_balances = HashMap::<String, u64>::new();
         for output in outputs {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
             *amount += output.amount;
         }
-        let result = (&self.deposit_balances, &self.unbalanced_deposits).transaction(
-            |(deposit_balances, unbalanced_deposits)| {
+        (&self.deposit_balances, &self.unbalanced_deposits)
+            .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {
                     if let Some(balance) = deposit_balances.get(address.as_bytes())? {
                         let (old_side_balance, main_balance) =
                             bincode::deserialize::<(u64, u64)>(&balance)
-                                .map_err(ConnectError::from)
+                                .map_err(Error::from)
                                 .or_else(abort)?;
                         println!(
                             "main balance is {}. added {} to old side balance {}",
@@ -296,79 +272,84 @@ impl DB {
                         );
                         let new_side_balance = old_side_balance + side_delta;
                         if new_side_balance != main_balance {
-                            return abort(ConnectError::Unbalanced);
+                            return abort(
+                                ConnectError::Unbalanced {
+                                    address: address.clone(),
+                                    side_balance: bitcoin::Amount::from_sat(new_side_balance),
+                                    main_balance: bitcoin::Amount::from_sat(main_balance),
+                                }
+                                .into(),
+                            );
                         }
                         let new_balance = (new_side_balance, main_balance);
                         dbg!(new_balance);
                         let new_balance = bincode::serialize(&new_balance)
-                            .map_err(ConnectError::from)
+                            .map_err(Error::from)
                             .or_else(abort)?;
                         deposit_balances.insert(address.as_bytes(), new_balance)?;
                         unbalanced_deposits.remove(address.as_bytes())?;
                     } else {
-                        return abort(ConnectError::NoAddress);
+                        return abort(ConnectError::NoAddress(address.clone()).into());
                     }
                 }
                 if just_check {
-                    return abort(ConnectError::JustChecking);
+                    return abort(ConnectError::JustChecking.into());
                 }
                 Ok(())
-            },
-        );
-        dbg!(&result);
-        if let Err(TransactionError::Abort(ConnectError::JustChecking)) = result {
-            return true;
-        }
-        result.is_ok()
+            })
+            .map_err(|err| err.into())
+            .or_else(|err| match err {
+                Error::Connect(ConnectError::JustChecking) => Ok(()),
+                err => Err(err),
+            })
     }
 
     pub fn disconnect_deposit_outputs(
         &mut self,
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
-    ) -> bool {
+    ) -> Result<(), Error> {
         println!("disconnect_deposit_outputs");
         let mut side_balances = HashMap::<String, u64>::new();
         for output in outputs {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
             *amount += output.amount;
         }
-        let result = (&self.deposit_balances, &self.unbalanced_deposits).transaction(
-            |(deposit_balances, unbalanced_deposits)| {
+        (&self.deposit_balances, &self.unbalanced_deposits)
+            .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {
                     if let Some(balance) = deposit_balances.get(address.as_bytes())? {
                         let (old_side_balance, main_balance) =
                             bincode::deserialize::<(u64, u64)>(&balance)
-                                .map_err(DisconnectError::from)
+                                .map_err(Error::from)
                                 .or_else(abort)?;
                         let new_side_balance = old_side_balance - side_delta;
                         if !just_check {
                             let new_balance = (new_side_balance, main_balance);
                             let new_balance = bincode::serialize(&new_balance)
-                                .map_err(DisconnectError::from)
+                                .map_err(Error::from)
                                 .or_else(abort)?;
                             deposit_balances.insert(address.as_bytes(), new_balance)?;
                             unbalanced_deposits.insert(address.as_bytes(), &[])?;
                         }
                     } else {
-                        return abort(DisconnectError::JustChecking);
+                        return abort(DisconnectError::JustChecking.into());
                     }
                 }
                 Ok(())
-            },
-        );
-        if let Err(TransactionError::Abort(DisconnectError::JustChecking)) = result {
-            return true;
-        }
-        result.is_ok()
+            })
+            .map_err(|err| err.into())
+            .or_else(|err| match err {
+                Error::Disconnect(DisconnectError::JustChecking) => Ok(()),
+                err => Err(err),
+            })
     }
 
-    pub fn update_deposits(&self, deposits: &[Deposit]) {
-        dbg!("update_deposits");
+    pub fn update_deposits(&self, deposits: &[Deposit]) -> Result<(), Error> {
         // New deposits are sorted in CTIP order.
         let sorted_deposits = DB::sort_deposits(deposits);
         // We get the last deposit stored in the db.
-        let (last_index, last_deposit) = match self.get_last_deposit() {
+        let (last_index, last_deposit) = match self.get_last_deposit()? {
             Some((last_index, last_deposit)) => (Some(last_index), Some(last_deposit)),
             None => (None, None),
         };
@@ -379,9 +360,6 @@ impl DB {
             // or if there are no deposits in db it is 0.
             None => 0,
         };
-        dbg!(start_index);
-        // We get an index -> deposit HashMap, by zipping a sequence of indices
-        // starting at start_index with deposits not in the database.
         let sorted_deposits = sorted_deposits
             .into_iter()
             // We skip new deposits until we find one that "spends" the
@@ -409,10 +387,7 @@ impl DB {
         let mut deposits_batch = sled::Batch::default();
         for (index, deposit) in sorted_deposits {
             let index = start_index + index;
-            deposits_batch.insert(
-                &(index as u32).to_be_bytes(),
-                bincode::serialize(&deposit).expect("failed to serialize deposit"),
-            );
+            deposits_batch.insert(&(index as u32).to_be_bytes(), bincode::serialize(&deposit)?);
             if deposit.amount() < prev_amount {
                 continue;
             }
@@ -443,7 +418,7 @@ impl DB {
                     let balance = deposit_balances
                         .get(address.as_bytes())?;
                     let balance = match balance {
-                        Some(balance) => Some(bincode::deserialize::<(u64, u64)>(&balance).map_err(ConflictableTransactionError::Abort)?),
+                        Some(balance) => Some(bincode::deserialize::<(u64, u64)>(&balance).or_else(abort)?),
                         None => None,
                     };
                     let balance = match balance {
@@ -451,13 +426,13 @@ impl DB {
                         None => (0, main_amount.as_sat()),
                     };
                     dbg!(&address, &balance);
-                    let balance = bincode::serialize(&balance).map_err(ConflictableTransactionError::Abort)?;
+                    let balance = bincode::serialize(&balance).or_else(abort)?;
                     deposit_balances.insert(address.as_bytes(), balance)?;
                     unbalanced_deposits.insert(address.as_bytes(), &[])?;
                 }
                 Ok(())
             })
-            .unwrap();
+            .map_err(|err| err.into())
     }
 
     pub fn sort_deposits(deposits: &[Deposit]) -> Vec<Deposit> {
@@ -501,32 +476,31 @@ impl DB {
         sorted_deposits
     }
 
-    pub fn get_last_deposit(&self) -> Option<(usize, Deposit)> {
+    pub fn get_last_deposit(&self) -> Result<Option<(usize, Deposit)>, Error> {
         self.deposits
-            .last()
-            .expect("failed to get last deposit")
+            .last()?
             .map(|(index, deposit)| {
-                (
+                Ok((
                     BigEndian::read_u32(index.as_ref()) as usize,
-                    bincode::deserialize(deposit.as_ref()).expect("failed to deserialize deposit"),
-                )
+                    bincode::deserialize(deposit.as_ref())?,
+                ))
             })
+            .transpose()
     }
 
-    pub fn remove_last_deposit(&self) {
-        self.deposits
-            .pop_max()
-            .expect("failed to remove last deposit");
+    pub fn remove_last_deposit(&self) -> Result<(), Error> {
+        self.deposits.pop_max()?;
+        Ok(())
     }
 
-    pub fn is_outpoint_spent(&self, outpoint: Vec<u8>) -> bool {
+    pub fn is_outpoint_spent(&self, outpoint: Vec<u8>) -> Result<bool, Error> {
         self.spent_outpoints
             .contains_key(outpoint.as_slice())
-            .unwrap()
+            .map_err(|err| err.into())
     }
 
-    pub fn vote_bundle(&mut self, txid: &Txid) {
-        let inputs = self.get_inputs(txid);
+    pub fn vote_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        let inputs = self.get_inputs(txid)?;
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -536,27 +510,27 @@ impl DB {
                 |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
                     for input in inputs.iter() {
                         let withdrawal = outpoint_to_withdrawal.get(input)?;
-                        if !withdrawal.is_some() {
-                            return abort("broadcasted invalid bundle");
+                        if withdrawal.is_none() {
+                            return abort(Error::NoWithdrawalInDb(hex::encode(&input)));
                         }
                         unspent_outpoints.remove(input.as_slice())?;
                         spent_outpoints.insert(input.as_slice(), &[])?;
                     }
                     Ok(())
                 },
-            )
-            .expect("failed to mark voting bundle inputs as spent");
+            )?;
+        Ok(())
     }
 
-    pub fn spend_bundle(&mut self, txid: &Txid) {
-        let inputs = self.get_inputs(txid);
+    pub fn spend_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        let inputs = self.get_inputs(txid)?;
         (
             &self.spent_bundle_hashes,
             &self.unspent_outpoints,
             &self.spent_outpoints,
         )
             .transaction(
-                |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| -> sled::transaction::ConflictableTransactionResult<()> {
+                |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| {
                     spent_bundle_hashes.insert(txid.as_inner(), &[])?;
                     for input in inputs.iter() {
                         unspent_outpoints.remove(input.as_slice())?;
@@ -565,11 +539,11 @@ impl DB {
                     Ok(())
                 },
             )
-            .expect("failed to mark bundle as spent");
+            .map_err(|err: TransactionError<Error>| err.into())
     }
 
-    pub fn fail_bundle(&mut self, txid: &Txid) {
-        let inputs = self.get_inputs(txid);
+    pub fn fail_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        let inputs = self.get_inputs(txid)?;
         (
             &self.failed_bundle_hashes,
             &self.unspent_outpoints,
@@ -585,81 +559,73 @@ impl DB {
                     }
                     let last_failed_bundle_height = match values.get(BLOCK_HEIGHT)? {
                         Some(height) => height,
-                        None => return abort("failed to get current block height"),
+                        None => return abort(Error::NoBlockHeight),
                     };
                     values.insert(LAST_FAILED_BUNDLE_HEIGHT, last_failed_bundle_height)?;
                     Ok(())
                 },
-            )
-            .expect("failed to mark bundle as failed");
+            )?;
+        Ok(())
     }
 
-    pub fn get_blocks_since_last_failed_bundle(&self) -> usize {
-        let block_height = match self
-            .values
-            .get(BLOCK_HEIGHT)
-            .expect("failed to get block height")
-        {
+    pub fn get_blocks_since_last_failed_bundle(&self) -> Result<usize, Error> {
+        let block_height = match self.values.get(BLOCK_HEIGHT)? {
             Some(block_height) => BigEndian::read_u64(&block_height) as usize,
             // No block height set means we are at genesis block.
             None => 0,
         };
-        let last_failed_bundle_height = match self
-            .values
-            .get(LAST_FAILED_BUNDLE_HEIGHT)
-            .expect("failed to get last failed bundle height")
-        {
+        let last_failed_bundle_height = match self.values.get(LAST_FAILED_BUNDLE_HEIGHT)? {
             Some(last_failed_bundle_height) => {
                 BigEndian::read_u64(&last_failed_bundle_height) as usize
             }
             // If there were no bundles then last bundle height is 0.
             None => 0,
         };
-        block_height - last_failed_bundle_height
+        Ok(block_height - last_failed_bundle_height)
     }
 
-    pub fn get_spent_bundle_hashes(&self) -> HashSet<Txid> {
+    pub fn get_spent_bundle_hashes(&self) -> Result<HashSet<Txid>, Error> {
         self.spent_bundle_hashes
             .iter()
             .map(|item| {
-                let (txid, _) = item.unwrap();
+                let (txid, _) = item?;
                 let mut txid_inner: [u8; 32] = Default::default();
                 txid_inner.copy_from_slice(&txid);
-                Txid::from_inner(txid_inner)
+                Ok(Txid::from_inner(txid_inner))
             })
             .collect()
     }
 
-    pub fn get_failed_bundle_hashes(&self) -> HashSet<Txid> {
+    pub fn get_failed_bundle_hashes(&self) -> Result<HashSet<Txid>, Error> {
         self.failed_bundle_hashes
             .iter()
             .map(|item| {
-                let (txid, _) = item.unwrap();
+                let (txid, _) = item?;
                 let mut txid_inner: [u8; 32] = Default::default();
                 txid_inner.copy_from_slice(&txid);
-                Txid::from_inner(txid_inner)
+                Ok(Txid::from_inner(txid_inner))
             })
             .collect()
     }
 
-    pub fn get_inputs(&mut self, txid: &Txid) -> Vec<Vec<u8>> {
+    pub fn get_inputs(&mut self, txid: &Txid) -> Result<Vec<Vec<u8>>, Error> {
         let hash = txid.into_inner();
-        self.bundle_hash_to_inputs
-            .get(hash)
-            .expect("failed to get bundle inputs")
-            .map(|inputs| {
-                bincode::deserialize::<Vec<Vec<u8>>>(&inputs)
-                    .expect("failed to deserialize bundle inputs")
-            })
-            .unwrap_or_default()
+        let inputs = match self.bundle_hash_to_inputs.get(hash)? {
+            Some(inputs) => inputs,
+            None => return Ok(vec![]),
+        };
+        bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
     }
 
-    pub fn create_bundle(&mut self) -> Option<bitcoin::Transaction> {
+    pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
-            let (outpoint, _) = item.unwrap();
-            let withdrawal = self.outpoint_to_withdrawal.get(&outpoint).unwrap().unwrap();
-            let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal).unwrap();
-            (outpoint.to_vec(), withdrawal)
+            let (outpoint, _) = item?;
+            let withdrawal = match self.outpoint_to_withdrawal.get(&outpoint)? {
+                Some(withdrawal) => withdrawal,
+                None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
+            };
+            let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal)?;
+            Ok((outpoint.to_vec(), withdrawal))
         });
 
         // Aggregate all outputs by destination.
@@ -667,7 +633,7 @@ impl DB {
         let mut dest_to_withdrawal = HashMap::<[u8; 20], (u64, u64, u64)>::new();
         let mut outpoints = vec![];
         for withdrawal in withdrawals {
-            let (outpoint, output) = withdrawal;
+            let (outpoint, output) = withdrawal?;
             outpoints.push(outpoint);
             let (amount, mainchain_fee, height) =
                 dest_to_withdrawal.entry(output.dest).or_insert((0, 0, 0));
@@ -693,7 +659,7 @@ impl DB {
             .collect();
         // Don't create an empty bundle.
         if outputs.is_empty() {
-            return None;
+            return Ok(None);
         }
         // Sort the outputs in descending order from best to worst.
         //
@@ -756,37 +722,62 @@ impl DB {
             let hash = bundle.txid();
             let hash = hash.into_inner();
             let inputs = outpoints;
-            let inputs = bincode::serialize(&inputs).expect("failed to serialize bundle inputs");
-            self.bundle_hash_to_inputs
-                .insert(hash, inputs)
-                .expect("failed to write bundle inputs");
+            let inputs = bincode::serialize(&inputs)?;
+            self.bundle_hash_to_inputs.insert(hash, inputs)?;
         }
-        Some(bundle)
+        Ok(Some(bundle))
     }
 }
 
-#[derive(Debug)]
-enum ConnectError {
-    Bincode(bincode::Error),
-    Unbalanced,
-    NoAddress,
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("sled error")]
+    Sled(#[from] sled::Error),
+    #[error("bincode error")]
+    Bincode(#[from] bincode::Error),
+    #[error("connect block error")]
+    Connect(#[from] ConnectError),
+    #[error("disconnect block error")]
+    Disconnect(#[from] DisconnectError),
+    #[error("no deposit for {0}")]
+    NoDeposit(String),
+    #[error("no current block height stored in db")]
+    NoBlockHeight,
+    #[error("withdrawal for outpoint {0} is not in db")]
+    NoWithdrawalInDb(String),
+    #[error("from utf8 error")]
+    FromUtf8(#[from] std::string::FromUtf8Error),
+    #[error("error converting slice to fixed size array")]
+    TryFromSlice(#[from] std::array::TryFromSliceError),
+}
+
+impl<E: Into<Error>> From<TransactionError<E>> for Error {
+    fn from(error: TransactionError<E>) -> Error {
+        match error {
+            TransactionError::Abort(err) => err.into(),
+            TransactionError::Storage(err) => err.into(),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ConnectError {
+    #[error("deposit is unbalanced {address}: {side_balance} out of {main_balance}")]
+    Unbalanced {
+        address: String,
+        side_balance: bitcoin::Amount,
+        main_balance: bitcoin::Amount,
+    },
+    #[error("there is no deposit with address {0}")]
+    NoAddress(String),
+    #[error("just checking")]
     JustChecking,
 }
 
-enum DisconnectError {
-    Bincode(bincode::Error),
+#[derive(thiserror::Error, Debug)]
+pub enum DisconnectError {
+    #[error("just checking")]
     JustChecking,
+    #[error("cannot disconnect genesis block")]
     Genesis,
-}
-
-impl From<bincode::Error> for ConnectError {
-    fn from(err: bincode::Error) -> ConnectError {
-        ConnectError::Bincode(err)
-    }
-}
-
-impl From<bincode::Error> for DisconnectError {
-    fn from(err: bincode::Error) -> DisconnectError {
-        DisconnectError::Bincode(err)
-    }
 }
