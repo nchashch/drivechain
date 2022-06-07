@@ -1,6 +1,6 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 
-#[derive(Eq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WithdrawalOutput {
     pub mainchain_fee: u64,
     pub height: u64,
@@ -28,51 +28,24 @@ pub struct WithdrawalOutput {
 /// never actually used).
 impl Ord for WithdrawalOutput {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.mainchain_fee == other.mainchain_fee
-            && self.height == other.height
-            && self.dest == other.dest
-            && self.amount == other.amount
-        {
+        if self == other {
             Ordering::Equal
-            // Output with greater fee is better.
         } else if self.mainchain_fee > other.mainchain_fee
-            // Output with lower height i.e. older output is better.
             || self.height < other.height
             || self.dest > other.dest
             || self.amount > other.amount
         {
+            // Output with greater fee is better.
             Ordering::Greater
         } else {
+            // Output with lower height i.e. older output is better.
             Ordering::Less
         }
     }
 }
 
-impl PartialEq for WithdrawalOutput {
-    fn eq(&self, other: &Self) -> bool {
-        self.mainchain_fee == other.mainchain_fee
-            && self.height == other.height
-            && self.dest == other.dest
-            && self.amount == other.amount
-    }
-}
-
 impl PartialOrd for WithdrawalOutput {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.mainchain_fee == other.mainchain_fee
-            && self.height == other.height
-            && self.dest == other.dest
-            && self.amount == other.amount
-        {
-            Some(Ordering::Equal)
-        } else if self.mainchain_fee > other.mainchain_fee
-            || self.height < other.height
-            || self.dest > other.dest
-            || self.amount > other.amount
-        {
-            Some(Ordering::Greater)
-        } else {
-            Some(Ordering::Less)
-        }
+        Some(self.cmp(other))
     }
 }
