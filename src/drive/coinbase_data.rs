@@ -18,8 +18,8 @@ impl CoinbaseData {
         if bytes.len() != 64 {
             return None;
         }
-        let prev_main_block_hash = BlockHash::from_slice(&bytes[0..32]).unwrap();
-        let prev_side_block_hash = BlockHash::from_slice(&bytes[32..64]).unwrap();
+        let prev_main_block_hash = BlockHash::from_slice(&bytes[0..32]).ok()?;
+        let prev_side_block_hash = BlockHash::from_slice(&bytes[32..64]).ok()?;
         Some(CoinbaseData {
             prev_main_block_hash,
             prev_side_block_hash,
