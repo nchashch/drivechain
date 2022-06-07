@@ -482,7 +482,7 @@ pub enum ParseError {
     BitcoinHex(#[from] bitcoin::hashes::hex::Error),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error, Debug)]
 pub enum RpcError {
     #[error("no mainchain tip")]
     NoMainchainTip,

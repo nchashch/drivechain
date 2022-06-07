@@ -30,6 +30,8 @@ pub enum Error {
     Db(#[from] db::Error),
     #[error("client error")]
     Client(#[from] client::Error),
+    #[error("error report")]
+    Report(#[from] color_eyre::Report),
 }
 
 impl Drivechain {
@@ -39,6 +41,7 @@ impl Drivechain {
         rpcuser: String,
         rpcpassword: String,
     ) -> Result<Drivechain, Error> {
+        color_eyre::install()?;
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
