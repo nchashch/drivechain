@@ -30,15 +30,15 @@ impl Ord for WithdrawalOutput {
     fn cmp(&self, other: &Self) -> Ordering {
         if self == other {
             Ordering::Equal
+            // Output with greater fee is better.
         } else if self.mainchain_fee > other.mainchain_fee
+            // Output with lower height i.e. older output is better.
             || self.height < other.height
             || self.dest > other.dest
             || self.amount > other.amount
         {
-            // Output with greater fee is better.
             Ordering::Greater
         } else {
-            // Output with lower height i.e. older output is better.
             Ordering::Less
         }
     }
