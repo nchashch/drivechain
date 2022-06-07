@@ -500,7 +500,7 @@ pub enum Error {
     Ureq(#[from] ureq::Error),
     #[error("parse error")]
     Parse(#[from] ParseError),
-    #[error("rpc error: `{0}`")]
+    #[error("rpc error")]
     Rpc(#[from] RpcError),
     #[error("json schema error")]
     JsonSchema,
