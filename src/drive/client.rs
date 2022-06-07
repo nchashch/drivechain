@@ -78,7 +78,7 @@ impl DrivechainClient {
                         Some(message) => message,
                         None => return Err(Error::JsonSchema),
                     };
-                    return Err(message.into());
+                    return Err(RpcError::InvalidBmm(message.into()).into());
                 }
                 // Time shows up as a string in json response, not as a number.
                 let time = match value["result"]["bmm"]["time"].as_str() {
@@ -133,7 +133,7 @@ impl DrivechainClient {
     }
 
     // get active mainchain tip
-    pub fn get_mainchain_tip(&self) -> Result<Option<BlockHash>, Error> {
+    pub fn get_mainchain_tip(&self) -> Result<BlockHash, Error> {
         let params = vec![];
         self.send_request("getchaintips", &params)
             .map(|value| {
@@ -151,10 +151,10 @@ impl DrivechainClient {
                             Ok(hash) => hash,
                             Err(err) => return Err(Error::Parse(err.into())),
                         };
-                        return Ok(Some(active_tip));
+                        return Ok(active_tip);
                     }
                 }
-                Ok(None)
+                Err(RpcError::NoMainchainTip.into())
             })
             .unwrap_or_else(Err)
     }
@@ -328,7 +328,7 @@ impl DrivechainClient {
                     };
                     Ok(deposit.tx.txid() == txid)
                 }
-                None => return Err("failed to verifydeposit".into()),
+                None => return Err(RpcError::InvalidDeposit.into()),
             })
             .unwrap_or_else(Err)
     }
@@ -482,6 +482,16 @@ pub enum ParseError {
     BitcoinHex(#[from] bitcoin::hashes::hex::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RpcError {
+    #[error("no mainchain tip")]
+    NoMainchainTip,
+    #[error("failed to verify deposit")]
+    InvalidDeposit,
+    #[error("failed to verify bmm: {0}")]
+    InvalidBmm(String),
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("json parse error")]
@@ -491,19 +501,7 @@ pub enum Error {
     #[error("parse error")]
     Parse(#[from] ParseError),
     #[error("rpc error: `{0}`")]
-    Rpc(String),
+    Rpc(#[from] RpcError),
     #[error("json schema error")]
     JsonSchema,
-}
-
-impl From<String> for Error {
-    fn from(error: String) -> Error {
-        Error::Rpc(error)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(error: &str) -> Error {
-        Error::Rpc(error.into())
-    }
 }

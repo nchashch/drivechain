@@ -69,7 +69,8 @@ fn new_drivechain(
     rpcpassword: &str,
 ) -> Box<Drivechain> {
     let drivechain =
-        drive::Drivechain::new(db_path, this_sidechain, rpcuser.into(), rpcpassword.into());
+        drive::Drivechain::new(db_path, this_sidechain, rpcuser.into(), rpcpassword.into())
+            .unwrap();
     Box::new(Drivechain(drivechain))
 }
 
@@ -89,13 +90,12 @@ fn get_withdrawal_data(address: &str, fee: u64) -> Vec<u8> {
 impl Drivechain {
     fn get_coinbase_data(&self, prev_side_block_hash: &str) -> Vec<u8> {
         let prev_side_block_hash = BlockHash::from_str(prev_side_block_hash).unwrap();
-        let coinbase_data = self.0.get_coinbase_data(prev_side_block_hash);
-        let coinbase_data = coinbase_data.serialize();
-        coinbase_data
+        let coinbase_data = self.0.get_coinbase_data(prev_side_block_hash).unwrap();
+        coinbase_data.serialize()
     }
 
     fn confirm_bmm(&mut self) -> Vec<ffi::Block> {
-        let block = self.0.confirm_bmm();
+        let block = self.0.confirm_bmm().unwrap();
         block
             .map(|block| ffi::Block {
                 data: hex::encode(block.data),
@@ -110,7 +110,9 @@ impl Drivechain {
         let critical_hash = TxMerkleNode::from_str(critical_hash).unwrap();
         let block_data = hex::decode(block_data).unwrap();
         let amount = bitcoin::Amount::from_sat(amount);
-        self.0.attempt_bmm(&critical_hash, &block_data, amount);
+        self.0
+            .attempt_bmm(&critical_hash, &block_data, amount)
+            .unwrap();
     }
 
     fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> bool {
@@ -148,7 +150,7 @@ impl Drivechain {
     }
 
     fn get_deposit_outputs(&self) -> Vec<ffi::Output> {
-        self.0.update_deposits();
+        self.0.update_deposits().unwrap();
         self.0
             .db
             .get_deposit_outputs()
@@ -210,7 +212,7 @@ impl Drivechain {
     }
 
     fn attempt_bundle_broadcast(&mut self) {
-        self.0.attempt_bundle_broadcast();
+        self.0.attempt_bundle_broadcast().unwrap();
     }
 
     fn is_outpoint_spent(&self, outpoint: String) -> bool {

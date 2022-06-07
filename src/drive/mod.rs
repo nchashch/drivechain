@@ -9,7 +9,6 @@ use bitcoin::util::amount::Amount;
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
-use std::collections::HashMap;
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
@@ -25,13 +24,21 @@ pub struct Drivechain {
     pub db: db::DB,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("db error")]
+    Db(#[from] db::Error),
+    #[error("client error")]
+    Client(#[from] client::Error),
+}
+
 impl Drivechain {
     pub fn new<P: AsRef<std::path::Path>>(
         db_path: P,
         this_sidechain: usize,
         rpcuser: String,
         rpcpassword: String,
-    ) -> Drivechain {
+    ) -> Result<Drivechain, Error> {
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
@@ -43,62 +50,53 @@ impl Drivechain {
             rpcpassword,
         };
 
-        Drivechain {
+        Ok(Drivechain {
             client,
             bmm_cache: BMMCache::new(),
-            db: db::DB::new(db_path).unwrap(),
-        }
+            db: db::DB::new(db_path)?,
+        })
     }
 
-    pub fn get_coinbase_data(&self, prev_side_block_hash: BlockHash) -> CoinbaseData {
-        let prev_main_block_hash = self
-            .client
-            .get_mainchain_tip()
-            .expect("failed to get mainchain tip")
-            .expect("no mainchain tip");
-        CoinbaseData {
+    pub fn get_coinbase_data(
+        &self,
+        prev_side_block_hash: BlockHash,
+    ) -> Result<CoinbaseData, Error> {
+        let prev_main_block_hash = self.client.get_mainchain_tip()?;
+        Ok(CoinbaseData {
             prev_main_block_hash,
             prev_side_block_hash,
-        }
+        })
     }
 
     // Attempts to blind merge mine a block.
     pub fn attempt_bmm(
         &mut self,
         critical_hash: &TxMerkleNode,
-        block_data: &Vec<u8>,
+        block_data: &[u8],
         amount: Amount,
-    ) {
-        let mainchain_tip_hash = self
-            .client
-            .get_mainchain_tip()
-            .expect("failed to get mainchain tip")
-            .expect("no mainchain tip");
+    ) -> Result<(), Error> {
+        let mainchain_tip_hash = self.client.get_mainchain_tip()?;
         // Create a BMM request.
         let txid = self
             .client
-            .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount)
-            .unwrap();
+            .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount)?;
         let bmm_request = BMMRequest {
-            txid: txid,
+            txid,
             critical_hash: *critical_hash,
             side_block_data: block_data.to_vec(),
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
+        Ok(())
     }
 
     // Check if any bmm request was accepted.
-    pub fn confirm_bmm(&mut self) -> Option<Block> {
-        let mainchain_tip_hash = self
-            .client
-            .get_mainchain_tip()
-            .expect("failed to get mainchain tip")
-            .expect("no mainchain tip");
+    pub fn confirm_bmm(&mut self) -> Result<Option<Block>, Error> {
+        let mainchain_tip_hash = self.client.get_mainchain_tip()?;
         if self.bmm_cache.prev_main_block_hash == mainchain_tip_hash {
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
-            return None;
+            return Ok(None);
         }
         // Mainchain tip has changed so all requests for previous tip are now
         // invalid hence we update our prev_main_block_hash
@@ -106,7 +104,7 @@ impl Drivechain {
         // and delete all requests with drain method.
         for request in self.bmm_cache.requests.drain(..) {
             // We check if our request was included in a mainchain block.
-            if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid).unwrap() {
+            if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
                 // And we check that critical_hash was actually included in
                 // coinbase on mainchain.
                 if let Ok(verified) = self
@@ -118,13 +116,13 @@ impl Drivechain {
                     let block = Block {
                         data: request.side_block_data,
                         time: verified.time,
-                        main_block_hash: main_block_hash,
+                        main_block_hash,
                     };
-                    return Some(block);
+                    return Ok(Some(block));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     pub fn format_deposit_address(&self, str_dest: &str) -> String {
@@ -134,65 +132,49 @@ impl Drivechain {
         format!("{}{}", deposit_address, hash)
     }
 
-    pub fn update_deposits(&self) {
+    pub fn update_deposits(&self) -> Result<(), Error> {
         let mut last_deposit = self
             .db
-            .get_last_deposit()
-            .unwrap()
+            .get_last_deposit()?
             .map(|(_, last_deposit)| last_deposit);
         while !last_deposit.clone().map_or(true, |last_deposit| {
-            self.client.verify_deposit(&last_deposit).unwrap()
+            self.client.verify_deposit(&last_deposit).unwrap_or(false)
         }) {
-            self.db.remove_last_deposit().unwrap();
+            self.db.remove_last_deposit()?;
             last_deposit = self
                 .db
-                .get_last_deposit()
-                .unwrap()
+                .get_last_deposit()?
                 .map(|(_, last_deposit)| last_deposit);
         }
         let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
-        let deposits = self.client.get_deposits(last_output).unwrap();
-        self.db.update_deposits(deposits.as_slice()).unwrap();
+        let deposits = self.client.get_deposits(last_output)?;
+        self.db.update_deposits(deposits.as_slice())?;
+        Ok(())
     }
 
-    fn update_bundles(&mut self) {
-        let known_failed = self.db.get_failed_bundle_hashes().unwrap();
-        let failed = self.client.get_failed_withdrawal_bundle_hashes().unwrap();
+    fn update_bundles(&mut self) -> Result<(), Error> {
+        let known_failed = self.db.get_failed_bundle_hashes()?;
+        let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
         let failed = failed.difference(&known_failed);
         for txid in failed {
-            self.db.fail_bundle(txid).unwrap();
+            self.db.fail_bundle(txid)?;
         }
-        let known_spent = self.db.get_spent_bundle_hashes().unwrap();
-        let spent = self.client.get_spent_withdrawal_bundle_hashes().unwrap();
+        let known_spent = self.db.get_spent_bundle_hashes()?;
+        let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
         let spent = spent.difference(&known_spent);
         for txid in spent {
-            self.db.spend_bundle(txid).unwrap();
+            self.db.spend_bundle(txid)?;
         }
-        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
         for txid in voting {
-            self.db.vote_bundle(&txid).unwrap();
+            self.db.vote_bundle(&txid)?;
         }
+        Ok(())
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
-    pub fn attempt_bundle_broadcast(&mut self) {
-        {
-            let bundles: HashMap<Txid, usize> = self
-                .db
-                .bundle_hash_to_inputs
-                .iter()
-                .map(|item| {
-                    let (txid, inputs) = item.unwrap();
-                    let mut txid_inner: [u8; 32] = Default::default();
-                    txid_inner.copy_from_slice(&txid);
-                    let txid = Txid::from_inner(txid_inner);
-                    let inputs = bincode::deserialize::<Vec<Vec<u8>>>(&inputs).unwrap();
-                    (txid, inputs.len())
-                })
-                .collect();
-            dbg!(bundles);
-        }
-        self.update_bundles();
+    pub fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
+        self.update_bundles()?;
         // Wait for some time after a failed bundle to give people an
         // opportunity to refund. If we would create a new bundle immediately,
         // some outputs would be included in it immediately again, and so they
@@ -204,43 +186,47 @@ impl Drivechain {
         //
         // FIXME: Make this value different for regtest/testnet/mainnet.
         const BUNDLE_WAIT_PERIOD: usize = 5;
-        let blocks_since_last_failed_bundle =
-            self.db.get_blocks_since_last_failed_bundle().unwrap();
+        let blocks_since_last_failed_bundle = self.db.get_blocks_since_last_failed_bundle()?;
         if blocks_since_last_failed_bundle < BUNDLE_WAIT_PERIOD {
             println!("last faild bundle was too soon");
-            return;
+            // FIXME: Figure out what type this should actually be. Just
+            // returning an Ok(()) seems wrong.
+            return Ok(());
         }
-        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
+        let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
         // If a bundle is already being voted on we don't need to broadcast a
         // new one.
         if !voting.is_empty() {
-            return;
+            // FIXME: Figure out what type this should actually be. Just
+            // returning an Ok(()) seems wrong.
+            return Ok(());
         }
-        let bundle = match self.db.create_bundle().unwrap() {
+        let bundle = match self.db.create_bundle()? {
             Some(bundle) => bundle,
-            None => return,
+            // FIXME: Figure out what type this should actually be. Just
+            // returning an Ok(()) seems wrong.
+            None => return Ok(()),
         };
         dbg!(
             &bundle,
             bundle.txid(),
-            self.get_bundle_status(&bundle.txid()),
+            self.get_bundle_status(&bundle.txid())?,
         );
-        let status = self.get_bundle_status(&bundle.txid());
+        let status = self.get_bundle_status(&bundle.txid())?;
         // We broadcast a bundle only if it was not seen before, meaning it is
         // neither failed nor spent.
         if status == BundleStatus::New {
-            self.client
-                .broadcast_withdrawal_bundle(&bundle)
-                .expect("failed to broadcast bundle");
-            self.db.vote_bundle(&bundle.txid()).unwrap();
+            self.client.broadcast_withdrawal_bundle(&bundle)?;
+            self.db.vote_bundle(&bundle.txid())?;
         }
+        Ok(())
     }
 
-    pub fn get_bundle_status(&self, txid: &Txid) -> BundleStatus {
-        let voting = self.client.get_voting_withdrawal_bundle_hashes().unwrap();
-        let failed = self.client.get_failed_withdrawal_bundle_hashes().unwrap();
-        let spent = self.client.get_spent_withdrawal_bundle_hashes().unwrap();
-        if voting.contains(txid) {
+    pub fn get_bundle_status(&self, txid: &Txid) -> Result<BundleStatus, Error> {
+        let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
+        let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
+        let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
+        Ok(if voting.contains(txid) {
             BundleStatus::Voting
         } else if failed.contains(txid) {
             BundleStatus::Failed
@@ -248,7 +234,7 @@ impl Drivechain {
             BundleStatus::Spent
         } else {
             BundleStatus::New
-        }
+        })
     }
 }
 
