@@ -9,6 +9,7 @@ use bitcoin::util::amount::Amount;
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
+use log::{debug, info, trace};
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
@@ -41,6 +42,7 @@ impl Drivechain {
         rpcuser: String,
         rpcpassword: String,
     ) -> Result<Drivechain, Error> {
+        trace!("creating drivechain object");
         color_eyre::install()?;
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
@@ -53,6 +55,7 @@ impl Drivechain {
             rpcpassword,
         };
 
+        trace!("drivechain object created successfuly");
         Ok(Drivechain {
             client,
             bmm_cache: BMMCache::new(),
@@ -65,6 +68,11 @@ impl Drivechain {
         prev_side_block_hash: BlockHash,
     ) -> Result<CoinbaseData, Error> {
         let prev_main_block_hash = self.client.get_mainchain_tip()?;
+        trace!(
+            "getting coinbase data for prev side block hash = {} and prev main block hash = {}",
+            &prev_side_block_hash,
+            &prev_main_block_hash
+        );
         Ok(CoinbaseData {
             prev_main_block_hash,
             prev_side_block_hash,
@@ -78,6 +86,11 @@ impl Drivechain {
         block_data: &[u8],
         amount: Amount,
     ) -> Result<(), Error> {
+        trace!(
+            "attempting to create a bmm request for block with hash = {} and with bribe = {}",
+            critical_hash,
+            amount
+        );
         let mainchain_tip_hash = self.client.get_mainchain_tip()?;
         // Create a BMM request.
         let txid = self
@@ -90,13 +103,19 @@ impl Drivechain {
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
+        trace!("bmm request was created successfuly txid = {}", txid);
         Ok(())
     }
 
     // Check if any bmm request was accepted.
     pub fn confirm_bmm(&mut self) -> Result<Option<Block>, Error> {
         let mainchain_tip_hash = self.client.get_mainchain_tip()?;
+        trace!(
+            "attempting to confirm that a block was bmmed at mainchain tip = {}",
+            &mainchain_tip_hash
+        );
         if self.bmm_cache.prev_main_block_hash == mainchain_tip_hash {
+            trace!("no new blocks on mainchain so sidechain block wasn't bmmed");
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
             return Ok(None);
@@ -105,6 +124,7 @@ impl Drivechain {
         // invalid hence we update our prev_main_block_hash
         self.bmm_cache.prev_main_block_hash = mainchain_tip_hash;
         // and delete all requests with drain method.
+        trace!("new blocks on mainchain, checking if sidechain block was bmmed");
         for request in self.bmm_cache.requests.drain(..) {
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
@@ -121,6 +141,15 @@ impl Drivechain {
                         time: verified.time,
                         main_block_hash,
                     };
+                    info!(
+                        "sidechain block {} was successfuly bmmed in mainchain block {} at {}",
+                        &request.critical_hash,
+                        &main_block_hash,
+                        chrono::DateTime::<chrono::Utc>::from(
+                            std::time::UNIX_EPOCH
+                                + std::time::Duration::from_secs(verified.time as u64)
+                        ),
+                    );
                     return Ok(Some(block));
                 }
             }
@@ -140,9 +169,11 @@ impl Drivechain {
             .db
             .get_last_deposit()?
             .map(|(_, last_deposit)| last_deposit);
+        trace!("updating deposits, last known deposit = {:?}", last_deposit);
         while !last_deposit.clone().map_or(true, |last_deposit| {
             self.client.verify_deposit(&last_deposit).unwrap_or(false)
         }) {
+            trace!("removing invalid last deposit = {:?}", last_deposit);
             self.db.remove_last_deposit()?;
             last_deposit = self
                 .db
@@ -152,31 +183,45 @@ impl Drivechain {
         let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
         let deposits = self.client.get_deposits(last_output)?;
         self.db.update_deposits(deposits.as_slice())?;
+        let last_deposit = self
+            .db
+            .get_last_deposit()?
+            .map(|(_, last_deposit)| last_deposit);
+        trace!(
+            "deposits were updated, new last known deposit = {:?}",
+            last_deposit
+        );
         Ok(())
     }
 
     fn update_bundles(&mut self) -> Result<(), Error> {
+        trace!("updating bundle statuses");
         let known_failed = self.db.get_failed_bundle_hashes()?;
         let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
         let failed = failed.difference(&known_failed);
         for txid in failed {
+            trace!("bundle {} failed", txid);
             self.db.fail_bundle(txid)?;
         }
         let known_spent = self.db.get_spent_bundle_hashes()?;
         let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
         let spent = spent.difference(&known_spent);
         for txid in spent {
+            trace!("bundle {} is spent", txid);
             self.db.spend_bundle(txid)?;
         }
         let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
         for txid in voting {
+            trace!("bundle {} is being voted on", txid);
             self.db.vote_bundle(&txid)?;
         }
+        trace!("bundle statuses were updated successfuly");
         Ok(())
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
     pub fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
+        trace!("attempting to create and broadcast a new bundle");
         self.update_bundles()?;
         // Wait for some time after a failed bundle to give people an
         // opportunity to refund. If we would create a new bundle immediately,
@@ -191,7 +236,7 @@ impl Drivechain {
         const BUNDLE_WAIT_PERIOD: usize = 5;
         let blocks_since_last_failed_bundle = self.db.get_blocks_since_last_failed_bundle()?;
         if blocks_since_last_failed_bundle < BUNDLE_WAIT_PERIOD {
-            println!("last faild bundle was too soon");
+            info!("cannot create new bundle, because last faild bundle was too soon, need to wait {} more blocks", BUNDLE_WAIT_PERIOD - blocks_since_last_failed_bundle);
             // FIXME: Figure out what type this should actually be. Just
             // returning an Ok(()) seems wrong.
             return Ok(());
@@ -200,6 +245,10 @@ impl Drivechain {
         // If a bundle is already being voted on we don't need to broadcast a
         // new one.
         if !voting.is_empty() {
+            info!(
+                "cannot create new bundle, there is already a bundle being voted on: {:?}",
+                voting
+            );
             // FIXME: Figure out what type this should actually be. Just
             // returning an Ok(()) seems wrong.
             return Ok(());
@@ -208,19 +257,22 @@ impl Drivechain {
             Some(bundle) => bundle,
             // FIXME: Figure out what type this should actually be. Just
             // returning an Ok(()) seems wrong.
-            None => return Ok(()),
+            None => {
+                info!("cannot create new bundle, there are no unspent withdrawals");
+                return Ok(());
+            }
         };
-        dbg!(
-            &bundle,
-            bundle.txid(),
-            self.get_bundle_status(&bundle.txid())?,
-        );
         let status = self.get_bundle_status(&bundle.txid())?;
+        info!("bundle {} created it is {}", bundle.txid(), status,);
+        trace!("bundle = {:?}", bundle);
         // We broadcast a bundle only if it was not seen before, meaning it is
         // neither failed nor spent.
         if status == BundleStatus::New {
             self.client.broadcast_withdrawal_bundle(&bundle)?;
             self.db.vote_bundle(&bundle.txid())?;
+            info!("bundle is new, so it is broadcast to mainchain");
+        } else {
+            info!("bundle is {}, so it is ignored", status);
         }
         Ok(())
     }
@@ -269,4 +321,15 @@ pub enum BundleStatus {
     Voting,
     Failed,
     Spent,
+}
+
+impl std::fmt::Display for BundleStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BundleStatus::New => write!(f, "new"),
+            BundleStatus::Voting => write!(f, "being voted on"),
+            BundleStatus::Failed => write!(f, "failed"),
+            BundleStatus::Spent => write!(f, "spent"),
+        }
+    }
 }
