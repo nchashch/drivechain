@@ -9,6 +9,7 @@ use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
+use log::trace;
 use sled::transaction::{abort, TransactionError};
 use sled::Transactional;
 use std::collections::{HashMap, HashSet};
@@ -55,7 +56,8 @@ pub struct DB {
 impl DB {
     // Here panicking is appropriate becuase failing to open sidechain db is not
     // a recoverable error.
-    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<DB, Error> {
+    pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(path: P) -> Result<DB, Error> {
+        trace!("creating drivechain object with path = {}", path);
         let db = sled::open(path)?;
         let deposits = db.open_tree(DEPOSITS)?;
         let deposit_balances = db.open_tree(DEPOSIT_BALANCES)?;
@@ -66,9 +68,8 @@ impl DB {
         let bundle_hash_to_inputs = db.open_tree(BUNDLE_HASH_TO_INPUTS)?;
         let failed_bundle_hashes = db.open_tree(FAILED_BUNDLE_HASHES)?;
         let spent_bundle_hashes = db.open_tree(SPENT_BUNDLE_HASHES)?;
-
         let values = db.open_tree(VALUES)?;
-
+        trace!("drivechain object successfuly created");
         Ok(DB {
             db,
             deposits,
@@ -89,7 +90,9 @@ impl DB {
     }
 
     pub fn get_deposit_outputs(&self) -> Result<Vec<Output>, Error> {
-        self.unbalanced_deposits
+        trace!("getting unpaid deposit outputs from db");
+        let deposit_outputs: Result<Vec<Output>, Error> = self
+            .unbalanced_deposits
             .iter()
             .map(|address| {
                 let (address, _) = address?;
@@ -103,13 +106,19 @@ impl DB {
                     amount: main_balance - side_balance,
                 })
             })
-            .collect()
+            .collect();
+        match &deposit_outputs {
+            Ok(outputs) => trace!("got {} unpaid deposit outputs", outputs.len()),
+            Err(err) => trace!("failed to get deposit outputs with error = {}", err),
+        };
+        deposit_outputs
     }
 
     pub fn connect_withdrawals(
         &mut self,
         withdrawals: HashMap<Vec<u8>, WithdrawalOutput>,
     ) -> Result<(), Error> {
+        trace!("connecting {} withdrawals", withdrawals.len());
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -142,6 +151,7 @@ impl DB {
                     outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
                     unspent_outpoints.insert(outpoint, &[])?;
                 }
+                trace!("withdrawals connected");
                 Ok(())
             })
             .map_err(|err: TransactionError<Error>| err.into())
@@ -156,6 +166,7 @@ impl DB {
     // have some minimum number of confirmations to make it harder to invalidate
     // the current bundle by reorging the sidechain independently of mainchain.
     pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+        trace!("disconnecting {} withdrawals", outpoints.len());
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -183,6 +194,7 @@ impl DB {
                         unspent_outpoints.remove(outpoint)?;
                         spent_outpoints.remove(outpoint)?;
                     }
+                    trace!("withdrawals disconnected");
                     Ok(())
                 },
             )
@@ -192,6 +204,7 @@ impl DB {
     // FIXME: Add separate refunded_outpoints store to allow checking spent
     // bundle validity.
     pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+        trace!("connecting {} refunds", refund_outpoints.len());
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -208,6 +221,7 @@ impl DB {
                             spent_outpoints.insert(outpoint, &[])?;
                         }
                     }
+                    trace!("refunds connected");
                     Ok(())
                 },
             )
@@ -220,6 +234,7 @@ impl DB {
     }
 
     pub fn disconnect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+        trace!("disconnecting {} refunds", refund_outpoints.len());
         (
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
@@ -236,6 +251,7 @@ impl DB {
                             unspent_outpoints.insert(outpoint, &[])?;
                         }
                     }
+                    trace!("refunds disconnected");
                     Ok(())
                 },
             )
@@ -252,12 +268,19 @@ impl DB {
         outputs: impl Iterator<Item = Output>,
         just_check: bool,
     ) -> Result<(), Error> {
-        println!("connect_deposit_outputs");
         let mut side_balances = HashMap::<String, u64>::new();
         for output in outputs {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
             *amount += output.amount;
         }
+        trace!(
+            "connecting {} deposit outputs{}",
+            side_balances.len(),
+            match just_check {
+                true => " (just checking)",
+                false => "",
+            }
+        );
         (&self.deposit_balances, &self.unbalanced_deposits)
             .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {
@@ -266,9 +289,11 @@ impl DB {
                             bincode::deserialize::<(u64, u64)>(&balance)
                                 .map_err(Error::from)
                                 .or_else(abort)?;
-                        println!(
+                        trace!(
                             "main balance is {}. added {} to old side balance {}",
-                            main_balance, side_delta, old_side_balance
+                            main_balance,
+                            side_delta,
+                            old_side_balance
                         );
                         let new_side_balance = old_side_balance + side_delta;
                         if new_side_balance != main_balance {
@@ -282,7 +307,6 @@ impl DB {
                             );
                         }
                         let new_balance = (new_side_balance, main_balance);
-                        dbg!(new_balance);
                         let new_balance = bincode::serialize(&new_balance)
                             .map_err(Error::from)
                             .or_else(abort)?;
@@ -295,6 +319,7 @@ impl DB {
                 if just_check {
                     return abort(ConnectError::JustChecking.into());
                 }
+                trace!("deposit outputs connected");
                 Ok(())
             })
             .map_err(|err| err.into())
@@ -315,6 +340,14 @@ impl DB {
             let amount = side_balances.entry(output.address.clone()).or_insert(0);
             *amount += output.amount;
         }
+        trace!(
+            "disconnecting {} deposit outputs{}",
+            side_balances.len(),
+            match just_check {
+                true => " (just checking)",
+                false => "",
+            }
+        );
         (&self.deposit_balances, &self.unbalanced_deposits)
             .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {
@@ -336,6 +369,7 @@ impl DB {
                         return abort(DisconnectError::JustChecking.into());
                     }
                 }
+                trace!("deposit outputs disconnected");
                 Ok(())
             })
             .map_err(|err| err.into())
@@ -346,6 +380,7 @@ impl DB {
     }
 
     pub fn update_deposits(&self, deposits: &[Deposit]) -> Result<(), Error> {
+        trace!("updating deposits db with {} new deposits", deposits.len());
         // New deposits are sorted in CTIP order.
         let sorted_deposits = DB::sort_deposits(deposits);
         // We get the last deposit stored in the db.
@@ -391,7 +426,7 @@ impl DB {
             if deposit.amount() < prev_amount {
                 continue;
             }
-            println!(
+            trace!(
                 "index {} added {} to {}",
                 index,
                 deposit.amount() - prev_amount,
@@ -404,7 +439,6 @@ impl DB {
             prev_amount = deposit.amount();
         }
 
-        dbg!(&balances);
         (
             &self.deposits,
             &self.deposit_balances,
@@ -414,7 +448,6 @@ impl DB {
                 deposits.apply_batch(&deposits_batch)?;
 
                 for (address, main_amount) in balances.iter() {
-                    println!("iteration of update deposits for {} with {}", address, main_amount);
                     let balance = deposit_balances
                         .get(address.as_bytes())?;
                     let balance = match balance {
@@ -430,6 +463,7 @@ impl DB {
                     deposit_balances.insert(address.as_bytes(), balance)?;
                     unbalanced_deposits.insert(address.as_bytes(), &[])?;
                 }
+                trace!("deposits updated successfuly");
                 Ok(())
             })
             .map_err(|err| err.into())
@@ -500,6 +534,10 @@ impl DB {
     }
 
     pub fn vote_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        trace!(
+            "bundle {} is being marked as \"being voted on\" in db",
+            txid
+        );
         let inputs = self.get_inputs(txid)?;
         (
             &self.outpoint_to_withdrawal,
@@ -523,6 +561,7 @@ impl DB {
     }
 
     pub fn spend_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        trace!("bundle {} is being marked as \"spent\" in db", txid);
         let inputs = self.get_inputs(txid)?;
         (
             &self.spent_bundle_hashes,
@@ -543,6 +582,7 @@ impl DB {
     }
 
     pub fn fail_bundle(&mut self, txid: &Txid) -> Result<(), Error> {
+        trace!("bundle {} is being marked as \"failed\" in db", txid);
         let inputs = self.get_inputs(txid)?;
         (
             &self.failed_bundle_hashes,
@@ -618,6 +658,7 @@ impl DB {
     }
 
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
+        trace!("creating a new bundle from unspent withdrawals in db",);
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
             let (outpoint, _) = item?;
             let withdrawal = match self.outpoint_to_withdrawal.get(&outpoint)? {
@@ -646,6 +687,11 @@ impl DB {
             // reasonable value for WithdrawalOutput::height later.
             *height = std::cmp::min(*height, output.height);
         }
+        trace!(
+            "{} unspent withdrawals were aggregated into {} bundle outputs",
+            outpoints.len(),
+            dest_to_withdrawal.len()
+        );
         // We iterate over our HashMap with aggregated (amount, fee, height)
         // tripples and convert it into a vector of WithdrawalOutputs.
         let mut outputs: Vec<WithdrawalOutput> = dest_to_withdrawal
@@ -659,6 +705,7 @@ impl DB {
             .collect();
         // Don't create an empty bundle.
         if outputs.is_empty() {
+            trace!("there are no unspent withdrawals in db so we don't create a new bundle");
             return Ok(None);
         }
         // Sort the outputs in descending order from best to worst.
@@ -712,6 +759,11 @@ impl DB {
             value: 0,
             script_pubkey: script,
         };
+        trace!(
+            "created a new bundle with fee = {} and {} outputs",
+            fee,
+            bundle_outputs.len()
+        );
         let bundle = bitcoin::Transaction {
             version: 2,
             lock_time: 0,
@@ -725,6 +777,7 @@ impl DB {
             let inputs = bincode::serialize(&inputs)?;
             self.bundle_hash_to_inputs.insert(hash, inputs)?;
         }
+        trace!("bundle was created successfuly");
         Ok(Some(bundle))
     }
 }

@@ -36,7 +36,7 @@ pub enum Error {
 }
 
 impl Drivechain {
-    pub fn new<P: AsRef<std::path::Path>>(
+    pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(
         db_path: P,
         this_sidechain: usize,
         rpcuser: String,
