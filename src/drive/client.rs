@@ -4,6 +4,7 @@ use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
 use bitcoin::util::psbt::serialize::Deserialize;
+use log::{info, trace};
 use std::collections::HashSet;
 use std::str::FromStr;
 use ureq::json;
@@ -71,6 +72,11 @@ impl DrivechainClient {
             json!(critical_hash.to_string()),
             json!(self.this_sidechain),
         ];
+        trace!(
+            "verifying bmm main hash = {}, critical hash = {}",
+            main_block_hash,
+            critical_hash
+        );
         self.send_request("verifybmm", &params)
             .map(|value| {
                 if value["error"] != ureq::serde_json::Value::Null {
@@ -97,6 +103,7 @@ impl DrivechainClient {
                     Ok(txid) => txid,
                     Err(err) => return Err(Error::Parse(err.into())),
                 };
+                trace!("bmm is valid txid = {}, time = {}", txid, time);
                 Ok(VerifiedBMM { time, txid })
             })
             .unwrap_or_else(Err)
@@ -109,6 +116,13 @@ impl DrivechainClient {
         height: usize,
         amount: Amount,
     ) -> Result<Txid, Error> {
+        trace!(
+            "sending bmm request critical hash = {}, prev main hash = {}, height = {}, amount = {}",
+            critical_hash,
+            prev_main_block_hash,
+            height,
+            amount
+        );
         let str_hash_prev = prev_main_block_hash.to_string();
         let params = vec![
             json!(amount.to_string_in(Denomination::Bitcoin)),
@@ -127,6 +141,7 @@ impl DrivechainClient {
                     Ok(txid) => txid,
                     Err(err) => return Err(Error::Parse(err.into())),
                 };
+                trace!("bmm request sent successfuly txid = {}", txid);
                 Ok(txid)
             })
             .unwrap_or_else(Err)
@@ -232,6 +247,10 @@ impl DrivechainClient {
     }
 
     pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<Deposit>, Error> {
+        trace!(
+            "requesting deposits since last deposit = {:?}",
+            last_deposit
+        );
         let params = match last_deposit {
             Some((txid, nburnindex)) => vec![
                 json!(self.this_sidechain),
@@ -242,7 +261,7 @@ impl DrivechainClient {
         };
         self.send_request("listsidechaindeposits", &params)
             .map(|value| {
-                let result = match value["result"].as_array() {
+                let result: Result<Vec<Deposit>, Error> = match value["result"].as_array() {
                     Some(result) => result
                         .iter()
                         .map(|val| {
@@ -294,6 +313,10 @@ impl DrivechainClient {
                         .collect(),
                     None => return Err(Error::JsonSchema),
                 };
+                match &result {
+                    Ok(deposits) => trace!("got {} new deposits", deposits.len()),
+                    Err(err) => info!("failed to get new deposits with error = {}", err),
+                };
                 result
             })
             .unwrap_or_else(Err)
@@ -307,6 +330,7 @@ impl DrivechainClient {
     }
 
     pub fn verify_deposit(&self, deposit: &Deposit) -> Result<bool, Error> {
+        trace!("verifying deposit {:?}", deposit);
         let params = vec![
             json!(deposit.blockhash.to_string()),
             json!(deposit.tx.txid().to_string()),
@@ -326,14 +350,20 @@ impl DrivechainClient {
                         Ok(txid) => txid,
                         Err(err) => return Err(Error::Parse(err.into())),
                     };
+                    if deposit.tx.txid() == txid {
+                        trace!("deposit is valid");
+                    } else {
+                        trace!("deposit is invalid");
+                    }
                     Ok(deposit.tx.txid() == txid)
                 }
-                None => return Err(RpcError::InvalidDeposit.into()),
+                None => Err(RpcError::InvalidDeposit.into()),
             })
             .unwrap_or_else(Err)
     }
 
     pub fn broadcast_withdrawal_bundle(&self, wttx: &Transaction) -> Result<Option<Txid>, Error> {
+        trace!("broadcasting withdrawal bundle {}", wttx.txid());
         let params = vec![
             json!(self.this_sidechain),
             json!(hex::encode(wttx.serialize())),

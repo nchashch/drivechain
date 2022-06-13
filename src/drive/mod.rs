@@ -9,7 +9,7 @@ use bitcoin::util::amount::Amount;
 use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
-use log::{debug, info, trace};
+use log::{info, trace};
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
