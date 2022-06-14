@@ -61,6 +61,23 @@ impl DrivechainClient {
         resp
     }
 
+    pub fn is_main_block_connected(&self, main_block_hash: &BlockHash) -> Result<bool, Error> {
+        trace!(
+            "checking if mainchain block {} is part of consensus",
+            main_block_hash
+        );
+        let params = vec![json!(main_block_hash.to_string())];
+        self.send_request("getblock", &params)
+            .map(|value| {
+                let confirmations = match value["result"]["confirmations"].as_i64() {
+                    Some(c) => c,
+                    None => return Err(Error::JsonSchema),
+                };
+                Ok(confirmations != -1)
+            })
+            .unwrap_or_else(Err)
+    }
+
     // check that a block was successfuly bmmed
     pub fn verify_bmm(
         &self,

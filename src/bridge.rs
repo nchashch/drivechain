@@ -55,6 +55,7 @@ mod ffi {
             outputs: Vec<Output>,
             just_check: bool,
         ) -> Result<bool>;
+        fn is_main_block_connected(&self, main_block_hash: &str) -> Result<bool>;
         fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
         fn verify_block_bmm(
             &self,
@@ -124,6 +125,15 @@ impl Drivechain {
         let amount = bitcoin::Amount::from_sat(amount);
         self.0.attempt_bmm(&critical_hash, &block_data, amount)?;
         Ok(())
+    }
+
+    fn is_main_block_connected(&self, main_block_hash: &str) -> color_eyre::Result<bool, Error> {
+        let main_block_hash = BlockHash::from_str(main_block_hash)?;
+        self.0
+            .client
+            .is_main_block_connected(&main_block_hash)
+            .map_err(drive::Error::Client)
+            .map_err(|err| err.into())
     }
 
     fn verify_header_bmm(
