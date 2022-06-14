@@ -157,7 +157,6 @@ impl DB {
             .map_err(|err: TransactionError<Error>| err.into())
     }
 
-    // FIXME: Handle mainchain reorgs.
     // FIXME: It should be impossible to disconnect spent withdrawals if on
     // mainchain the bundle that spends the corresponding outpoints is not
     // disconnected as well.
