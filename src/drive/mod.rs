@@ -10,6 +10,7 @@ use client::DrivechainClient;
 pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
 use log::{info, trace};
+use std::collections::HashMap;
 pub use withdrawal::WithdrawalOutput;
 
 #[derive(Debug)]
@@ -290,6 +291,37 @@ impl Drivechain {
         } else {
             BundleStatus::New
         })
+    }
+
+    // FIXME: Make connect_block and disconnect block atomic.
+    pub fn connect_block(
+        &mut self,
+        deposits: &[deposit::Output],
+        withdrawals: &HashMap<Vec<u8>, WithdrawalOutput>,
+        refunds: &[Vec<u8>],
+        just_check: bool,
+    ) -> Result<(), Error> {
+        self.db.connect_deposit_outputs(deposits, just_check)?;
+        if !just_check {
+            self.db.connect_withdrawals(withdrawals)?;
+            self.db.connect_refunds(refunds)?;
+        }
+        Ok(())
+    }
+
+    pub fn disconnect_block(
+        &mut self,
+        deposits: &[deposit::Output],
+        withdrawals: &[Vec<u8>],
+        refunds: &[Vec<u8>],
+        just_check: bool,
+    ) -> Result<(), Error> {
+        self.db.disconnect_deposit_outputs(deposits, just_check)?;
+        if !just_check {
+            self.db.disconnect_withdrawals(withdrawals)?;
+            self.db.disconnect_refunds(refunds)?;
+        }
+        Ok(())
     }
 }
 

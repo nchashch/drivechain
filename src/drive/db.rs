@@ -116,7 +116,7 @@ impl DB {
 
     pub fn connect_withdrawals(
         &mut self,
-        withdrawals: HashMap<Vec<u8>, WithdrawalOutput>,
+        withdrawals: &HashMap<Vec<u8>, WithdrawalOutput>,
     ) -> Result<(), Error> {
         trace!("connecting {} withdrawals", withdrawals.len());
         (
@@ -164,7 +164,7 @@ impl DB {
     // It might make sense to only create bundles from withdrawal outputs that
     // have some minimum number of confirmations to make it harder to invalidate
     // the current bundle by reorging the sidechain independently of mainchain.
-    pub fn disconnect_withdrawals(&mut self, outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+    pub fn disconnect_withdrawals(&mut self, outpoints: &[Vec<u8>]) -> Result<(), Error> {
         trace!("disconnecting {} withdrawals", outpoints.len());
         (
             &self.outpoint_to_withdrawal,
@@ -202,7 +202,7 @@ impl DB {
 
     // FIXME: Add separate refunded_outpoints store to allow checking spent
     // bundle validity.
-    pub fn connect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+    pub fn connect_refunds(&mut self, refund_outpoints: &[Vec<u8>]) -> Result<(), Error> {
         trace!("connecting {} refunds", refund_outpoints.len());
         (
             &self.outpoint_to_withdrawal,
@@ -232,7 +232,7 @@ impl DB {
             })
     }
 
-    pub fn disconnect_refunds(&mut self, refund_outpoints: Vec<Vec<u8>>) -> Result<(), Error> {
+    pub fn disconnect_refunds(&mut self, refund_outpoints: &[Vec<u8>]) -> Result<(), Error> {
         trace!("disconnecting {} refunds", refund_outpoints.len());
         (
             &self.outpoint_to_withdrawal,
@@ -264,22 +264,22 @@ impl DB {
 
     pub fn connect_deposit_outputs(
         &mut self,
-        outputs: impl Iterator<Item = Output>,
+        outputs: &[Output],
         just_check: bool,
     ) -> Result<(), Error> {
-        let mut side_balances = HashMap::<String, u64>::new();
-        for output in outputs {
-            let amount = side_balances.entry(output.address.clone()).or_insert(0);
-            *amount += output.amount;
-        }
         trace!(
             "connecting {} deposit outputs{}",
-            side_balances.len(),
+            outputs.len(),
             match just_check {
                 true => " (just checking)",
                 false => "",
             }
         );
+        let mut side_balances = HashMap::<String, u64>::new();
+        for output in outputs {
+            let amount = side_balances.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
+        }
         (&self.deposit_balances, &self.unbalanced_deposits)
             .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {
@@ -330,23 +330,22 @@ impl DB {
 
     pub fn disconnect_deposit_outputs(
         &mut self,
-        outputs: impl Iterator<Item = Output>,
+        outputs: &[Output],
         just_check: bool,
     ) -> Result<(), Error> {
-        println!("disconnect_deposit_outputs");
-        let mut side_balances = HashMap::<String, u64>::new();
-        for output in outputs {
-            let amount = side_balances.entry(output.address.clone()).or_insert(0);
-            *amount += output.amount;
-        }
         trace!(
             "disconnecting {} deposit outputs{}",
-            side_balances.len(),
+            outputs.len(),
             match just_check {
                 true => " (just checking)",
                 false => "",
             }
         );
+        let mut side_balances = HashMap::<String, u64>::new();
+        for output in outputs {
+            let amount = side_balances.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
+        }
         (&self.deposit_balances, &self.unbalanced_deposits)
             .transaction(|(deposit_balances, unbalanced_deposits)| {
                 for (address, side_delta) in side_balances.iter() {

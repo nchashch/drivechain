@@ -33,28 +33,26 @@ mod ffi {
             rpcuser: &str,
             rpcpassword: &str,
         ) -> Result<Box<Drivechain>>;
-
         fn get_coinbase_data(&self, prev_side_block_hash: &str) -> Result<Vec<u8>>;
         fn confirm_bmm(&mut self) -> Result<Vec<Block>>;
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64)
             -> Result<()>;
-
-        fn connect_withdrawals(&mut self, withdrawals: Vec<Withdrawal>) -> Result<bool>;
-        fn disconnect_withdrawals(&mut self, outpoints: Vec<String>) -> Result<bool>;
-        fn connect_refunds(&mut self, refund_outpoints: Vec<String>) -> Result<bool>;
-        fn disconnect_refunds(&mut self, refund_outpoints: Vec<String>) -> Result<bool>;
+        fn connect_block(
+            &mut self,
+            deposits: Vec<Output>,
+            withdrawals: Vec<Withdrawal>,
+            refunds: Vec<String>,
+            just_check: bool,
+        ) -> Result<bool>;
+        fn disconnect_block(
+            &mut self,
+            deposits: Vec<Output>,
+            withdrawals: Vec<String>,
+            refunds: Vec<String>,
+            just_check: bool,
+        ) -> Result<bool>;
         fn attempt_bundle_broadcast(&mut self) -> Result<()>;
         fn is_outpoint_spent(&self, outpoint: String) -> Result<bool>;
-        fn connect_deposit_outputs(
-            &mut self,
-            outputs: Vec<Output>,
-            just_check: bool,
-        ) -> Result<bool>;
-        fn disconnect_deposit_outputs(
-            &mut self,
-            outputs: Vec<Output>,
-            just_check: bool,
-        ) -> Result<bool>;
         fn is_main_block_connected(&self, main_block_hash: &str) -> Result<bool>;
         fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
         fn verify_block_bmm(
@@ -196,10 +194,33 @@ impl Drivechain {
             .collect())
     }
 
-    fn connect_withdrawals(
+    fn attempt_bundle_broadcast(&mut self) -> color_eyre::Result<(), Error> {
+        Ok(self.0.attempt_bundle_broadcast()?)
+    }
+
+    fn is_outpoint_spent(&self, outpoint: String) -> color_eyre::Result<bool, Error> {
+        let outpoint = hex::decode(outpoint)?;
+        self.0
+            .db
+            .is_outpoint_spent(outpoint)
+            .map_err(|err| Error::Drive(err.into()))
+    }
+
+    fn connect_block(
         &mut self,
+        deposits: Vec<ffi::Output>,
         withdrawals: Vec<ffi::Withdrawal>,
+        refunds: Vec<String>,
+        just_check: bool,
     ) -> color_eyre::Result<bool, Error> {
+        let deposits: Vec<drive::deposit::Output> = deposits
+            .iter()
+            .map(|output| drive::deposit::Output {
+                address: output.address.clone(),
+                amount: output.amount,
+            })
+            .collect();
+
         let withdrawals: Result<HashMap<Vec<u8>, drive::WithdrawalOutput>, Error> = withdrawals
             .into_iter()
             .map(|w| {
@@ -220,83 +241,52 @@ impl Drivechain {
                 ))
             })
             .collect();
-        Ok(self.0.db.connect_withdrawals(withdrawals?).is_ok())
-    }
 
-    fn disconnect_withdrawals(
-        &mut self,
-        outpoints: Vec<String>,
-    ) -> color_eyre::Result<bool, Error> {
-        let outpoints: Result<Vec<Vec<u8>>, Error> = outpoints
-            .iter()
-            .map(|o| Ok(hex::decode(o)?.to_vec()))
-            .collect();
-        Ok(self.0.db.disconnect_withdrawals(outpoints?).is_ok())
-    }
-
-    fn connect_refunds(
-        &mut self,
-        refund_outpoints: Vec<String>,
-    ) -> color_eyre::Result<bool, Error> {
-        let refund_outpoints: Result<Vec<Vec<u8>>, Error> = refund_outpoints
+        let refunds: Result<Vec<Vec<u8>>, Error> = refunds
             .iter()
             .map(|r| Ok(hex::decode(r)?.to_vec()))
             .collect();
-        Ok(self.0.db.connect_refunds(refund_outpoints?).is_ok())
-    }
-
-    fn disconnect_refunds(
-        &mut self,
-        refund_outpoints: Vec<String>,
-    ) -> color_eyre::Result<bool, Error> {
-        let refund_outpoints: Result<Vec<Vec<u8>>, Error> = refund_outpoints
-            .iter()
-            .map(|r| Ok(hex::decode(r)?.to_vec()))
-            .collect();
-        Ok(self.0.db.disconnect_refunds(refund_outpoints?).is_ok())
-    }
-
-    fn attempt_bundle_broadcast(&mut self) -> color_eyre::Result<(), Error> {
-        Ok(self.0.attempt_bundle_broadcast()?)
-    }
-
-    fn is_outpoint_spent(&self, outpoint: String) -> color_eyre::Result<bool, Error> {
-        let outpoint = hex::decode(outpoint)?;
-        self.0
-            .db
-            .is_outpoint_spent(outpoint)
-            .map_err(|err| Error::Drive(err.into()))
-    }
-
-    fn connect_deposit_outputs(
-        &mut self,
-        outputs: Vec<ffi::Output>,
-        just_check: bool,
-    ) -> color_eyre::Result<bool, Error> {
-        let outputs = outputs.iter().map(|output| drive::deposit::Output {
-            address: output.address.clone(),
-            amount: output.amount,
-        });
         Ok(self
             .0
-            .db
-            .connect_deposit_outputs(outputs, just_check)
+            .connect_block(
+                deposits.as_slice(),
+                &withdrawals?,
+                refunds?.as_slice(),
+                just_check,
+            )
             .is_ok())
     }
 
-    fn disconnect_deposit_outputs(
+    fn disconnect_block(
         &mut self,
-        outputs: Vec<ffi::Output>,
+        deposits: Vec<ffi::Output>,
+        withdrawals: Vec<String>,
+        refunds: Vec<String>,
         just_check: bool,
     ) -> color_eyre::Result<bool, Error> {
-        let outputs = outputs.iter().map(|output| drive::deposit::Output {
-            address: output.address.clone(),
-            amount: output.amount,
-        });
+        let deposits: Vec<drive::deposit::Output> = deposits
+            .iter()
+            .map(|deposit| drive::deposit::Output {
+                address: deposit.address.clone(),
+                amount: deposit.amount,
+            })
+            .collect();
+        let withdrawals: Result<Vec<Vec<u8>>, Error> = withdrawals
+            .iter()
+            .map(|o| Ok(hex::decode(o)?.to_vec()))
+            .collect();
+        let refunds: Result<Vec<Vec<u8>>, Error> = refunds
+            .iter()
+            .map(|r| Ok(hex::decode(r)?.to_vec()))
+            .collect();
         Ok(self
             .0
-            .db
-            .disconnect_deposit_outputs(outputs, just_check)
+            .disconnect_block(
+                deposits.as_slice(),
+                withdrawals?.as_slice(),
+                refunds?.as_slice(),
+                just_check,
+            )
             .is_ok())
     }
 
