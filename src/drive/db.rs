@@ -653,6 +653,12 @@ impl DB {
         bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
     }
 
+    // FIXME: Add cutoff for maximum number of withdrawal outputs.
+    //
+    // FIXME: Set mainchain fee to latest fee, not to maximum fee for aggregated
+    // withdrawal outputs.
+    //
+    // TODO: Investigate possibility of determining mainchain fee automatically.
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
         trace!("creating a new bundle from unspent withdrawals in db",);
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
