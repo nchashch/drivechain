@@ -212,13 +212,13 @@ impl Client {
             .unwrap_or_else(Err)
     }
 
-    pub fn get_prev_block_hash(&self, block_hash: &BlockHash) -> Result<Option<BlockHash>, Error> {
+    pub fn get_prev_block_hash(&self, block_hash: &BlockHash) -> Result<BlockHash, Error> {
         let params = vec![json!(block_hash.to_string())];
         self.send_request("getblock", &params)
             .map(|value| {
                 let prev_block_hash = match value["result"].get("previousblockhash") {
                     Some(pbh) => pbh,
-                    None => return Ok(None),
+                    None => return Err(Error::GenesisBlock),
                 };
                 let prev_block_hash = match prev_block_hash.as_str() {
                     Some(pbh) => pbh,
@@ -228,12 +228,15 @@ impl Client {
                     Ok(pbh) => pbh,
                     Err(err) => return Err(Error::Parse(err.into())),
                 };
-                Ok(Some(prev_block_hash))
+                Ok(prev_block_hash)
             })
             .unwrap_or_else(Err)
     }
 
-    pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<MainDeposit>, Error> {
+    pub fn get_deposits(
+        &self,
+        last_deposit: Option<(Txid, usize)>,
+    ) -> Result<Vec<MainDeposit>, Error> {
         trace!(
             "requesting deposits since last deposit = {:?}",
             last_deposit
@@ -501,4 +504,6 @@ pub enum Error {
     Rpc(#[from] RpcError),
     #[error("json schema error")]
     JsonSchema,
+    #[error("genesis block doesn't have previous block")]
+    GenesisBlock,
 }

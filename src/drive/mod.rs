@@ -1,14 +1,12 @@
 mod client;
 mod db;
 mod deposit;
-mod prev_block_hashes;
 mod withdrawal;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::util::amount::Amount;
 pub use deposit::Deposit;
 use log::{info, trace};
-pub use prev_block_hashes::PrevBlockHashes;
 use std::collections::HashMap;
 pub use withdrawal::Withdrawal;
 
@@ -62,20 +60,17 @@ impl Drivechain {
         })
     }
 
-    pub fn get_prev_block_hashes(
+    pub fn get_mainchain_tip(&self) -> Result<BlockHash, Error> {
+        self.client.get_mainchain_tip().map_err(|err| err.into())
+    }
+
+    pub fn get_prev_main_block_hash(
         &self,
-        prev_side_block_hash: BlockHash,
-    ) -> Result<PrevBlockHashes, Error> {
-        let prev_main_block_hash = self.client.get_mainchain_tip()?;
-        trace!(
-            "getting prev block hashes: prev side block hash = {} and prev main block hash = {}",
-            &prev_side_block_hash,
-            &prev_main_block_hash
-        );
-        Ok(PrevBlockHashes {
-            prev_main_block_hash,
-            prev_side_block_hash,
-        })
+        main_block_hash: &BlockHash,
+    ) -> Result<BlockHash, Error> {
+        self.client
+            .get_prev_block_hash(main_block_hash)
+            .map_err(|err| err.into())
     }
 
     // Attempts to blind merge mine a block.
@@ -322,7 +317,7 @@ impl Drivechain {
         Ok(())
     }
 
-    pub fn verify_header_bmm(
+    pub fn verify_bmm(
         &self,
         main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
@@ -330,23 +325,6 @@ impl Drivechain {
         self.client
             .verify_bmm(main_block_hash, critical_hash)
             .map_err(|err| err.into())
-    }
-
-    pub fn verify_block_bmm(
-        &self,
-        main_block_hash: &BlockHash,
-        critical_hash: &TxMerkleNode,
-        prev_block_hashes: &PrevBlockHashes,
-    ) -> Result<bool, Error> {
-        self.verify_header_bmm(main_block_hash, critical_hash)?;
-        if let Some(prev_main_block_hash) = self.client.get_prev_block_hash(main_block_hash)? {
-            if prev_main_block_hash != prev_block_hashes.prev_main_block_hash {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false);
-        }
-        Ok(true)
     }
 
     pub fn is_main_block_connected(&self, main_block_hash: &BlockHash) -> Result<bool, Error> {

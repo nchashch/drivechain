@@ -32,7 +32,8 @@ mod ffi {
             rpcuser: &str,
             rpcpassword: &str,
         ) -> Result<Box<Drivechain>>;
-        fn get_prev_block_hashes(&self, prev_side_block_hash: &str) -> Result<Vec<u8>>;
+        fn get_mainchain_tip(&self) -> Result<Vec<u8>>;
+        fn get_prev_main_block_hash(&self, main_block_hash: &str) -> Result<Vec<u8>>;
         fn confirm_bmm(&mut self) -> Result<Vec<Block>>;
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64)
             -> Result<()>;
@@ -53,13 +54,7 @@ mod ffi {
         fn attempt_bundle_broadcast(&mut self) -> Result<()>;
         fn is_outpoint_spent(&self, outpoint: String) -> Result<bool>;
         fn is_main_block_connected(&self, main_block_hash: &str) -> Result<bool>;
-        fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
-        fn verify_block_bmm(
-            &self,
-            main_block_hash: &str,
-            critical_hash: &str,
-            prev_block_hashes: &str,
-        ) -> Result<bool>;
+        fn verify_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
         fn get_deposit_outputs(&self) -> Result<Vec<Output>>;
         fn format_deposit_address(&self, address: &str) -> String;
         fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>>;
@@ -87,12 +82,15 @@ fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>, Error> {
 }
 
 impl Drivechain {
-    fn get_prev_block_hashes(&self, prev_side_block_hash: &str) -> Result<Vec<u8>, Error> {
-        let prev_side_block_hash = BlockHash::from_str(prev_side_block_hash)?;
-        let prev_block_hashes = self.0.get_prev_block_hashes(prev_side_block_hash)?;
-        Ok(prev_block_hashes.serialize())
+    fn get_mainchain_tip(&self) -> Result<Vec<u8>, Error> {
+        let tip = self.0.get_mainchain_tip()?;
+        Ok(tip.to_vec())
     }
-
+    fn get_prev_main_block_hash(&self, main_block_hash: &str) -> Result<Vec<u8>, Error> {
+        let main_block_hash = BlockHash::from_str(main_block_hash)?;
+        let prev_hash = self.0.get_prev_main_block_hash(&main_block_hash)?;
+        Ok(prev_hash.to_vec())
+    }
     fn confirm_bmm(&mut self) -> Result<Vec<ffi::Block>, Error> {
         let block = self.0.confirm_bmm()?;
         Ok(block
@@ -125,38 +123,10 @@ impl Drivechain {
             .map_err(|err| err.into())
     }
 
-    fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool, Error> {
+    fn verify_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
-        Ok(self
-            .0
-            .verify_header_bmm(&main_block_hash, &critical_hash)
-            .is_ok())
-    }
-
-    fn verify_block_bmm(
-        &self,
-        main_block_hash: &str,
-        critical_hash: &str,
-        prev_block_hashes: &str,
-    ) -> Result<bool, Error> {
-        let main_block_hash = BlockHash::from_str(main_block_hash)?;
-        let critical_hash = TxMerkleNode::from_str(critical_hash)?;
-        if self
-            .0
-            .verify_header_bmm(&main_block_hash, &critical_hash)
-            .is_err()
-        {
-            return Ok(false);
-        }
-        let prev_block_hashes = hex::decode(prev_block_hashes)?;
-        let prev_block_hashes = match drive::PrevBlockHashes::deserialize(&prev_block_hashes) {
-            Some(cb) => cb,
-            None => return Err(Error::PrevBlockHashesDeserialize),
-        };
-        self.0
-            .verify_block_bmm(&main_block_hash, &critical_hash, &prev_block_hashes)
-            .map_err(|err| err.into())
+        Ok(self.0.verify_bmm(&main_block_hash, &critical_hash).is_ok())
     }
 
     fn get_deposit_outputs(&self) -> Result<Vec<ffi::Output>, Error> {
@@ -286,6 +256,4 @@ enum Error {
     BitcoinHex(#[from] bitcoin::hashes::hex::Error),
     #[error("bitcoin address error")]
     BitcoinAddress(#[from] bitcoin::util::address::Error),
-    #[error("failed to deserialize coinbase data")]
-    PrevBlockHashesDeserialize,
 }
