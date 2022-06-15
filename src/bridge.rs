@@ -1,7 +1,6 @@
 use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
-use bitcoin::util::address::{Address, Payload};
 use byteorder::{BigEndian, ByteOrder};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -81,16 +80,10 @@ fn new_drivechain(
     Ok(Box::new(Drivechain(drivechain)))
 }
 
-// FIXME: Check network here.
 fn get_withdrawal_data(address: &str, fee: u64) -> color_eyre::Result<Vec<u8>, Error> {
-    let address = Address::from_str(address)?;
-    let hash = match address.payload {
-        Payload::ScriptHash(hash) => hash,
-        _ => return Err(Error::WrongAddressType),
-    };
-    let fee = fee.to_be_bytes().to_vec();
-    let vec = [hash.to_vec(), fee].concat();
-    Ok(vec)
+    let address = bitcoin::Address::from_str(address)?;
+    let fee = bitcoin::Amount::from_sat(fee);
+    drive::get_withdrawal_data(&address, &fee).map_err(|err| err.into())
 }
 
 impl Drivechain {
@@ -128,9 +121,7 @@ impl Drivechain {
     fn is_main_block_connected(&self, main_block_hash: &str) -> color_eyre::Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         self.0
-            .client
             .is_main_block_connected(&main_block_hash)
-            .map_err(drive::Error::Client)
             .map_err(|err| err.into())
     }
 
@@ -143,8 +134,7 @@ impl Drivechain {
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
         Ok(self
             .0
-            .client
-            .verify_bmm(&main_block_hash, &critical_hash)
+            .verify_header_bmm(&main_block_hash, &critical_hash)
             .is_ok())
     }
 
@@ -154,38 +144,30 @@ impl Drivechain {
         critical_hash: &str,
         coinbase_data: &str,
     ) -> color_eyre::Result<bool, Error> {
-        if !self.verify_header_bmm(main_block_hash, critical_hash)? {
+        let main_block_hash = BlockHash::from_str(main_block_hash)?;
+        let critical_hash = TxMerkleNode::from_str(critical_hash)?;
+        if self
+            .0
+            .verify_header_bmm(&main_block_hash, &critical_hash)
+            .is_err()
+        {
             return Ok(false);
         }
-        let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let coinbase_data = hex::decode(coinbase_data)?;
         let coinbase_data = match drive::CoinbaseData::deserialize(&coinbase_data) {
             Some(cb) => cb,
             None => return Err(Error::CoinbaseDataDeserialize),
         };
-
-        if let Some(prev_main_block_hash) = self
-            .0
-            .client
-            .get_prev_block_hash(&main_block_hash)
-            .map_err(|err| Error::Drive(err.into()))?
-        {
-            if prev_main_block_hash != coinbase_data.prev_main_block_hash {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false);
-        }
-        Ok(true)
+        self.0
+            .verify_block_bmm(&main_block_hash, &critical_hash, &coinbase_data)
+            .map_err(|err| err.into())
     }
 
     fn get_deposit_outputs(&self) -> color_eyre::Result<Vec<ffi::Output>, Error> {
         self.0.update_deposits()?;
         Ok(self
             .0
-            .db
-            .get_deposit_outputs()
-            .map_err(|err| Error::Drive(err.into()))?
+            .get_deposit_outputs()?
             .iter()
             .map(|output| ffi::Output {
                 address: output.address.clone(),
@@ -201,9 +183,8 @@ impl Drivechain {
     fn is_outpoint_spent(&self, outpoint: String) -> color_eyre::Result<bool, Error> {
         let outpoint = hex::decode(outpoint)?;
         self.0
-            .db
-            .is_outpoint_spent(outpoint)
-            .map_err(|err| Error::Drive(err.into()))
+            .is_outpoint_spent(outpoint.as_slice())
+            .map_err(|err| err.into())
     }
 
     fn connect_block(
@@ -295,7 +276,7 @@ impl Drivechain {
     }
 
     fn flush(&mut self) -> Result<usize, Error> {
-        self.0.db.flush().map_err(|err| Error::Drive(err.into()))
+        self.0.flush().map_err(|err| err.into())
     }
 }
 
@@ -309,8 +290,6 @@ enum Error {
     BitcoinHex(#[from] bitcoin::hashes::hex::Error),
     #[error("bitcoin address error")]
     BitcoinAddress(#[from] bitcoin::util::address::Error),
-    #[error("wrong address type")]
-    WrongAddressType,
     #[error("failed to deserialize coinbase data")]
     CoinbaseDataDeserialize,
 }

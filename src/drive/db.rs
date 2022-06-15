@@ -525,9 +525,9 @@ impl DB {
         Ok(())
     }
 
-    pub fn is_outpoint_spent(&self, outpoint: Vec<u8>) -> Result<bool, Error> {
+    pub fn is_outpoint_spent(&self, outpoint: &[u8]) -> Result<bool, Error> {
         self.spent_outpoints
-            .contains_key(outpoint.as_slice())
+            .contains_key(outpoint)
             .map_err(|err| err.into())
     }
 

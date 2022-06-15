@@ -21,9 +21,9 @@ pub struct Block {
 }
 
 pub struct Drivechain {
-    pub client: DrivechainClient,
+    client: DrivechainClient,
     bmm_cache: BMMCache,
-    pub db: db::DB,
+    db: db::DB,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +34,8 @@ pub enum Error {
     Client(#[from] client::Error),
     #[error("error report")]
     Report(#[from] color_eyre::Report),
+    #[error("wrong address type")]
+    WrongAddressType,
 }
 
 impl Drivechain {
@@ -323,6 +325,67 @@ impl Drivechain {
         }
         Ok(())
     }
+
+    pub fn verify_header_bmm(
+        &self,
+        main_block_hash: &BlockHash,
+        critical_hash: &TxMerkleNode,
+    ) -> Result<client::VerifiedBMM, Error> {
+        self.client
+            .verify_bmm(main_block_hash, critical_hash)
+            .map_err(|err| err.into())
+    }
+
+    pub fn verify_block_bmm(
+        &self,
+        main_block_hash: &BlockHash,
+        critical_hash: &TxMerkleNode,
+        coinbase_data: &CoinbaseData,
+    ) -> color_eyre::Result<bool, Error> {
+        self.verify_header_bmm(main_block_hash, critical_hash)?;
+        if let Some(prev_main_block_hash) = self.client.get_prev_block_hash(main_block_hash)? {
+            if prev_main_block_hash != coinbase_data.prev_main_block_hash {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub fn is_main_block_connected(&self, main_block_hash: &BlockHash) -> Result<bool, Error> {
+        self.client
+            .is_main_block_connected(main_block_hash)
+            .map_err(|err| err.into())
+    }
+
+    pub fn is_outpoint_spent(&self, outpoint: &[u8]) -> Result<bool, Error> {
+        self.db
+            .is_outpoint_spent(outpoint)
+            .map_err(|err| err.into())
+    }
+
+    pub fn flush(&mut self) -> Result<usize, Error> {
+        self.db.flush().map_err(|err| err.into())
+    }
+
+    pub fn get_deposit_outputs(&self) -> Result<Vec<deposit::Output>, Error> {
+        self.db.get_deposit_outputs().map_err(|err| err.into())
+    }
+}
+
+// FIXME: Check network here.
+pub fn get_withdrawal_data(
+    address: &bitcoin::Address,
+    fee: &bitcoin::Amount,
+) -> Result<Vec<u8>, Error> {
+    let hash = match address.payload {
+        bitcoin::util::address::Payload::ScriptHash(hash) => hash,
+        _ => return Err(Error::WrongAddressType),
+    };
+    let fee = fee.as_sat().to_be_bytes().to_vec();
+    let vec = [hash.to_vec(), fee].concat();
+    Ok(vec)
 }
 
 #[derive(Debug)]
