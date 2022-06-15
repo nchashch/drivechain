@@ -74,26 +74,26 @@ fn new_drivechain(
     this_sidechain: usize,
     rpcuser: &str,
     rpcpassword: &str,
-) -> color_eyre::Result<Box<Drivechain>, Error> {
+) -> Result<Box<Drivechain>, Error> {
     let drivechain =
         drive::Drivechain::new(db_path, this_sidechain, rpcuser.into(), rpcpassword.into())?;
     Ok(Box::new(Drivechain(drivechain)))
 }
 
-fn get_withdrawal_data(address: &str, fee: u64) -> color_eyre::Result<Vec<u8>, Error> {
+fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>, Error> {
     let address = bitcoin::Address::from_str(address)?;
     let fee = bitcoin::Amount::from_sat(fee);
     drive::get_withdrawal_data(&address, &fee).map_err(|err| err.into())
 }
 
 impl Drivechain {
-    fn get_coinbase_data(&self, prev_side_block_hash: &str) -> color_eyre::Result<Vec<u8>, Error> {
+    fn get_coinbase_data(&self, prev_side_block_hash: &str) -> Result<Vec<u8>, Error> {
         let prev_side_block_hash = BlockHash::from_str(prev_side_block_hash)?;
         let coinbase_data = self.0.get_coinbase_data(prev_side_block_hash)?;
         Ok(coinbase_data.serialize())
     }
 
-    fn confirm_bmm(&mut self) -> color_eyre::Result<Vec<ffi::Block>, Error> {
+    fn confirm_bmm(&mut self) -> Result<Vec<ffi::Block>, Error> {
         let block = self.0.confirm_bmm()?;
         Ok(block
             .map(|block| ffi::Block {
@@ -110,7 +110,7 @@ impl Drivechain {
         critical_hash: &str,
         block_data: &str,
         amount: u64,
-    ) -> color_eyre::Result<(), Error> {
+    ) -> Result<(), Error> {
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
         let block_data = hex::decode(block_data)?;
         let amount = bitcoin::Amount::from_sat(amount);
@@ -118,7 +118,7 @@ impl Drivechain {
         Ok(())
     }
 
-    fn is_main_block_connected(&self, main_block_hash: &str) -> color_eyre::Result<bool, Error> {
+    fn is_main_block_connected(&self, main_block_hash: &str) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         self.0
             .is_main_block_connected(&main_block_hash)
@@ -129,7 +129,7 @@ impl Drivechain {
         &self,
         main_block_hash: &str,
         critical_hash: &str,
-    ) -> color_eyre::Result<bool, Error> {
+    ) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
         Ok(self
@@ -143,7 +143,7 @@ impl Drivechain {
         main_block_hash: &str,
         critical_hash: &str,
         coinbase_data: &str,
-    ) -> color_eyre::Result<bool, Error> {
+    ) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
         if self
@@ -163,7 +163,7 @@ impl Drivechain {
             .map_err(|err| err.into())
     }
 
-    fn get_deposit_outputs(&self) -> color_eyre::Result<Vec<ffi::Output>, Error> {
+    fn get_deposit_outputs(&self) -> Result<Vec<ffi::Output>, Error> {
         self.0.update_deposits()?;
         Ok(self
             .0
@@ -176,11 +176,11 @@ impl Drivechain {
             .collect())
     }
 
-    fn attempt_bundle_broadcast(&mut self) -> color_eyre::Result<(), Error> {
+    fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
         Ok(self.0.attempt_bundle_broadcast()?)
     }
 
-    fn is_outpoint_spent(&self, outpoint: String) -> color_eyre::Result<bool, Error> {
+    fn is_outpoint_spent(&self, outpoint: String) -> Result<bool, Error> {
         let outpoint = hex::decode(outpoint)?;
         self.0
             .is_outpoint_spent(outpoint.as_slice())
@@ -193,7 +193,7 @@ impl Drivechain {
         withdrawals: Vec<ffi::Withdrawal>,
         refunds: Vec<String>,
         just_check: bool,
-    ) -> color_eyre::Result<bool, Error> {
+    ) -> Result<bool, Error> {
         let deposits: Vec<drive::deposit::Output> = deposits
             .iter()
             .map(|output| drive::deposit::Output {
@@ -244,7 +244,7 @@ impl Drivechain {
         withdrawals: Vec<String>,
         refunds: Vec<String>,
         just_check: bool,
-    ) -> color_eyre::Result<bool, Error> {
+    ) -> Result<bool, Error> {
         let deposits: Vec<drive::deposit::Output> = deposits
             .iter()
             .map(|deposit| drive::deposit::Output {

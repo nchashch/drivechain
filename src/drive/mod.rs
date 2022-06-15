@@ -32,8 +32,6 @@ pub enum Error {
     Db(#[from] db::Error),
     #[error("client error")]
     Client(#[from] client::Error),
-    #[error("error report")]
-    Report(#[from] color_eyre::Report),
     #[error("wrong address type")]
     WrongAddressType,
 }
@@ -46,7 +44,6 @@ impl Drivechain {
         rpcpassword: String,
     ) -> Result<Drivechain, Error> {
         trace!("creating drivechain object");
-        color_eyre::install()?;
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
@@ -341,7 +338,7 @@ impl Drivechain {
         main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
         coinbase_data: &CoinbaseData,
-    ) -> color_eyre::Result<bool, Error> {
+    ) -> Result<bool, Error> {
         self.verify_header_bmm(main_block_hash, critical_hash)?;
         if let Some(prev_main_block_hash) = self.client.get_prev_block_hash(main_block_hash)? {
             if prev_main_block_hash != coinbase_data.prev_main_block_hash {
