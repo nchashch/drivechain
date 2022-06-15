@@ -233,36 +233,6 @@ impl DrivechainClient {
             .unwrap_or_else(Err)
     }
 
-    pub fn get_block_count(&self) -> Result<usize, Error> {
-        let params = vec![];
-        self.send_request("getblockcount", &params)
-            .map(|value| {
-                let count = match value["result"].as_u64() {
-                    Some(count) => count,
-                    None => return Err(Error::JsonSchema),
-                };
-                Ok(count as usize)
-            })
-            .unwrap_or_else(Err)
-    }
-
-    pub fn get_block_hash(&self, height: usize) -> Result<BlockHash, Error> {
-        let params = vec![json!(height)];
-        self.send_request("getblockhash", &params)
-            .map(|value| {
-                let block_hash = match value["result"].as_str() {
-                    Some(bh) => bh,
-                    None => return Err(Error::JsonSchema),
-                };
-                let block_hash = match BlockHash::from_str(block_hash) {
-                    Ok(bh) => bh,
-                    Err(err) => return Err(Error::Parse(err.into())),
-                };
-                Ok(block_hash)
-            })
-            .unwrap_or_else(Err)
-    }
-
     pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<Deposit>, Error> {
         trace!(
             "requesting deposits since last deposit = {:?}",
@@ -397,26 +367,6 @@ impl DrivechainClient {
                         Txid::from_str(txid).map_err(|err| Error::Parse(err.into()))
                     })
                     .transpose()
-            })
-            .unwrap_or_else(Err)
-    }
-
-    pub fn is_bundle_spent(&self, txid: &Txid) -> Result<bool, Error> {
-        let params = vec![json!(txid.to_string()), json!(self.this_sidechain)];
-        self.send_request("havespentwithdrawal", &params)
-            .map(|value| match value["result"].as_bool() {
-                Some(is_spent) => Ok(is_spent),
-                None => Err(Error::JsonSchema),
-            })
-            .unwrap_or_else(Err)
-    }
-
-    pub fn is_bundle_failed(&self, txid: &Txid) -> Result<bool, Error> {
-        let params = vec![json!(txid.to_string()), json!(self.this_sidechain)];
-        self.send_request("havefailedwithdrawal", &params)
-            .map(|value| match value["result"].as_bool() {
-                Some(is_failed) => Ok(is_failed),
-                None => Err(Error::JsonSchema),
             })
             .unwrap_or_else(Err)
     }
