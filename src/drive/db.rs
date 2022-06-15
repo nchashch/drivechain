@@ -1,5 +1,5 @@
-use super::deposit::{Deposit, Output};
-use super::withdrawal::WithdrawalOutput;
+use super::deposit::{MainDeposit, Deposit};
+use super::withdrawal::Withdrawal;
 use bitcoin::blockdata::transaction::OutPoint;
 use bitcoin::blockdata::{
     opcodes, script,
@@ -41,7 +41,7 @@ pub struct DB {
     outpoint_to_withdrawal: sled::Tree,
     spent_outpoints: sled::Tree,
     unspent_outpoints: sled::Tree,
-    pub bundle_hash_to_inputs: sled::Tree,
+    bundle_hash_to_inputs: sled::Tree,
 
     // Failed and spent bundle hashes that we have already seen.
     failed_bundle_hashes: sled::Tree,
@@ -54,8 +54,6 @@ pub struct DB {
 }
 
 impl DB {
-    // Here panicking is appropriate becuase failing to open sidechain db is not
-    // a recoverable error.
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(path: P) -> Result<DB, Error> {
         trace!("creating drivechain object with path = {}", path);
         let db = sled::open(path)?;
@@ -89,9 +87,9 @@ impl DB {
         self.db.flush().map_err(|err| err.into())
     }
 
-    pub fn get_deposit_outputs(&self) -> Result<Vec<Output>, Error> {
+    pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
         trace!("getting unpaid deposit outputs from db");
-        let deposit_outputs: Result<Vec<Output>, Error> = self
+        let deposit_outputs: Result<Vec<Deposit>, Error> = self
             .unbalanced_deposits
             .iter()
             .map(|address| {
@@ -101,7 +99,7 @@ impl DB {
                     None => return Err(Error::NoDeposit(String::from_utf8(address.to_vec())?)),
                 };
                 let (side_balance, main_balance) = bincode::deserialize::<(u64, u64)>(&balance)?;
-                Ok(Output {
+                Ok(Deposit {
                     address: String::from_utf8(address.to_vec())?,
                     amount: main_balance - side_balance,
                 })
@@ -116,7 +114,7 @@ impl DB {
 
     pub fn connect_withdrawals(
         &mut self,
-        withdrawals: &HashMap<Vec<u8>, WithdrawalOutput>,
+        withdrawals: &HashMap<Vec<u8>, Withdrawal>,
     ) -> Result<(), Error> {
         trace!("connecting {} withdrawals", withdrawals.len());
         (
@@ -141,7 +139,7 @@ impl DB {
                 for (outpoint, withdrawal) in withdrawals.iter() {
                     dbg!(hex::encode(outpoint.as_slice()), &withdrawal);
                     let outpoint = outpoint.as_slice();
-                    let withdrawal = WithdrawalOutput {
+                    let withdrawal = Withdrawal {
                         height,
                         ..*withdrawal
                     };
@@ -264,7 +262,7 @@ impl DB {
 
     pub fn connect_deposit_outputs(
         &mut self,
-        outputs: &[Output],
+        outputs: &[Deposit],
         just_check: bool,
     ) -> Result<(), Error> {
         trace!(
@@ -330,7 +328,7 @@ impl DB {
 
     pub fn disconnect_deposit_outputs(
         &mut self,
-        outputs: &[Output],
+        outputs: &[Deposit],
         just_check: bool,
     ) -> Result<(), Error> {
         trace!(
@@ -377,7 +375,7 @@ impl DB {
             })
     }
 
-    pub fn update_deposits(&self, deposits: &[Deposit]) -> Result<(), Error> {
+    pub fn update_deposits(&self, deposits: &[MainDeposit]) -> Result<(), Error> {
         trace!("updating deposits db with {} new deposits", deposits.len());
         // New deposits are sorted in CTIP order.
         let sorted_deposits = DB::sort_deposits(deposits);
@@ -467,11 +465,11 @@ impl DB {
             .map_err(|err| err.into())
     }
 
-    pub fn sort_deposits(deposits: &[Deposit]) -> Vec<Deposit> {
+    pub fn sort_deposits(deposits: &[MainDeposit]) -> Vec<MainDeposit> {
         if deposits.is_empty() {
             return vec![];
         }
-        let mut outpoint_to_deposit = HashMap::<OutPoint, Deposit>::new();
+        let mut outpoint_to_deposit = HashMap::<OutPoint, MainDeposit>::new();
         let mut spent_by = HashMap::<OutPoint, OutPoint>::new();
         for deposit in deposits {
             outpoint_to_deposit.insert(deposit.outpoint(), deposit.clone());
@@ -493,7 +491,7 @@ impl DB {
                 panic!("Invalid deposit transaction - input spends more than one previous CTIP");
             }
         }
-        let mut sorted_deposits = Vec::<Deposit>::new();
+        let mut sorted_deposits = Vec::<MainDeposit>::new();
         if let Some(first_outpoint) = first_outpoint {
             sorted_deposits.push(outpoint_to_deposit[&first_outpoint].clone());
         }
@@ -508,7 +506,7 @@ impl DB {
         sorted_deposits
     }
 
-    pub fn get_last_deposit(&self) -> Result<Option<(usize, Deposit)>, Error> {
+    pub fn get_last_deposit(&self) -> Result<Option<(usize, MainDeposit)>, Error> {
         self.deposits
             .last()?
             .map(|(index, deposit)| {
@@ -663,7 +661,7 @@ impl DB {
                 Some(withdrawal) => withdrawal,
                 None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
             };
-            let withdrawal = bincode::deserialize::<WithdrawalOutput>(&withdrawal)?;
+            let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)?;
             Ok((outpoint.to_vec(), withdrawal))
         });
 
@@ -682,7 +680,7 @@ impl DB {
             *mainchain_fee = std::cmp::max(*mainchain_fee, output.mainchain_fee);
             // Height is only used for sorting so at this point it doesn't
             // matter, but we set it to the lowest one anyway just to have a
-            // reasonable value for WithdrawalOutput::height later.
+            // reasonable value for Withdrawal::height later.
             *height = std::cmp::min(*height, output.height);
         }
         trace!(
@@ -691,10 +689,10 @@ impl DB {
             dest_to_withdrawal.len()
         );
         // We iterate over our HashMap with aggregated (amount, fee, height)
-        // tripples and convert it into a vector of WithdrawalOutputs.
-        let mut outputs: Vec<WithdrawalOutput> = dest_to_withdrawal
+        // tripples and convert it into a vector of Withdrawals.
+        let mut outputs: Vec<Withdrawal> = dest_to_withdrawal
             .into_iter()
-            .map(|(dest, (amount, mainchain_fee, height))| WithdrawalOutput {
+            .map(|(dest, (amount, mainchain_fee, height))| Withdrawal {
                 dest,
                 amount,
                 mainchain_fee,
@@ -708,7 +706,7 @@ impl DB {
         }
         // Sort the outputs in descending order from best to worst.
         //
-        // See documentation for Ord trait implemenation of WithdrawalOutput for
+        // See documentation for Ord trait implemenation of Withdrawal for
         // explanation of how we compare outputs.
         outputs.sort_by_key(|a| std::cmp::Reverse(*a));
         let mut fee = 0;

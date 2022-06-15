@@ -1,4 +1,4 @@
-use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
+use bitcoin::blockdata::transaction::{OutPoint, Transaction};
 use bitcoin::hash_types::{BlockHash};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
@@ -6,7 +6,7 @@ use bitcoin::util::psbt::serialize::{Deserialize, Serialize};
 use serde::de::Error;
 
 #[derive(Debug, Clone)]
-pub struct Deposit {
+pub struct MainDeposit {
     pub blockhash: BlockHash,
     pub ntx: usize,
     pub nburnindex: usize,
@@ -16,7 +16,7 @@ pub struct Deposit {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SerdeDeposit {
+struct SerdeMainDeposit {
     blockhash: [u8; 32],
     ntx: usize,
     nburnindex: usize,
@@ -25,12 +25,12 @@ struct SerdeDeposit {
     strdest: String,
 }
 
-impl serde::Serialize for Deposit {
+impl serde::Serialize for MainDeposit {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let serialize_deposit = SerdeDeposit {
+        let serialize_deposit = SerdeMainDeposit {
             blockhash: *self.blockhash.as_inner(),
             ntx: self.ntx,
             nburnindex: self.nburnindex,
@@ -43,18 +43,18 @@ impl serde::Serialize for Deposit {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Deposit {
+impl<'de> serde::Deserialize<'de> for MainDeposit {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        match SerdeDeposit::deserialize(deserializer) {
+        match SerdeMainDeposit::deserialize(deserializer) {
             Ok(sd) => {
                 let tx = match Transaction::deserialize(sd.tx.as_slice()) {
                     Ok(tx) => Ok(tx),
                     Err(err) => Err(D::Error::custom(err)),
                 };
-                let deposit = Deposit {
+                let deposit = MainDeposit {
                     blockhash: BlockHash::from_inner(sd.blockhash),
                     ntx: sd.ntx,
                     nburnindex: sd.nburnindex,
@@ -69,7 +69,7 @@ impl<'de> serde::Deserialize<'de> for Deposit {
     }
 }
 
-impl Deposit {
+impl MainDeposit {
     pub fn outpoint(&self) -> OutPoint {
         OutPoint {
             txid: self.tx.txid(),
@@ -77,15 +77,11 @@ impl Deposit {
         }
     }
 
-    pub fn output(&self) -> TxOut {
-        self.tx.output[self.nburnindex].clone()
-    }
-
     pub fn amount(&self) -> Amount {
         Amount::from_sat(self.tx.output[self.nburnindex].value)
     }
 
-    pub fn is_spent_by(&self, other: &Deposit) -> bool {
+    pub fn is_spent_by(&self, other: &MainDeposit) -> bool {
         other
             .tx
             .input
@@ -97,7 +93,7 @@ impl Deposit {
 }
 
 #[derive(Debug)]
-pub struct Output {
+pub struct Deposit {
     pub address: String,
     pub amount: u64,
 }

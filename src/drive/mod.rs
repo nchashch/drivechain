@@ -1,17 +1,16 @@
 mod client;
-mod coinbase_data;
 mod db;
-pub mod deposit;
-pub mod withdrawal;
+mod deposit;
+mod prev_block_hashes;
+mod withdrawal;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::util::amount::Amount;
-use client::DrivechainClient;
-pub use coinbase_data::CoinbaseData;
 pub use deposit::Deposit;
 use log::{info, trace};
+pub use prev_block_hashes::PrevBlockHashes;
 use std::collections::HashMap;
-pub use withdrawal::WithdrawalOutput;
+pub use withdrawal::Withdrawal;
 
 #[derive(Debug)]
 pub struct Block {
@@ -21,7 +20,7 @@ pub struct Block {
 }
 
 pub struct Drivechain {
-    client: DrivechainClient,
+    client: client::Client,
     bmm_cache: BMMCache,
     db: db::DB,
 }
@@ -47,7 +46,7 @@ impl Drivechain {
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
 
-        let client = DrivechainClient {
+        let client = client::Client {
             this_sidechain,
             host: LOCALHOST.into(),
             port: MAINCHAIN_PORT,
@@ -63,17 +62,17 @@ impl Drivechain {
         })
     }
 
-    pub fn get_coinbase_data(
+    pub fn get_prev_block_hashes(
         &self,
         prev_side_block_hash: BlockHash,
-    ) -> Result<CoinbaseData, Error> {
+    ) -> Result<PrevBlockHashes, Error> {
         let prev_main_block_hash = self.client.get_mainchain_tip()?;
         trace!(
-            "getting coinbase data for prev side block hash = {} and prev main block hash = {}",
+            "getting prev block hashes: prev side block hash = {} and prev main block hash = {}",
             &prev_side_block_hash,
             &prev_main_block_hash
         );
-        Ok(CoinbaseData {
+        Ok(PrevBlockHashes {
             prev_main_block_hash,
             prev_side_block_hash,
         })
@@ -277,7 +276,7 @@ impl Drivechain {
         Ok(())
     }
 
-    pub fn get_bundle_status(&self, txid: &Txid) -> Result<BundleStatus, Error> {
+    fn get_bundle_status(&self, txid: &Txid) -> Result<BundleStatus, Error> {
         let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
         let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
         let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
@@ -295,8 +294,8 @@ impl Drivechain {
     // FIXME: Make connect_block and disconnect block atomic.
     pub fn connect_block(
         &mut self,
-        deposits: &[deposit::Output],
-        withdrawals: &HashMap<Vec<u8>, WithdrawalOutput>,
+        deposits: &[Deposit],
+        withdrawals: &HashMap<Vec<u8>, withdrawal::Withdrawal>,
         refunds: &[Vec<u8>],
         just_check: bool,
     ) -> Result<(), Error> {
@@ -310,7 +309,7 @@ impl Drivechain {
 
     pub fn disconnect_block(
         &mut self,
-        deposits: &[deposit::Output],
+        deposits: &[Deposit],
         withdrawals: &[Vec<u8>],
         refunds: &[Vec<u8>],
         just_check: bool,
@@ -337,11 +336,11 @@ impl Drivechain {
         &self,
         main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
-        coinbase_data: &CoinbaseData,
+        prev_block_hashes: &PrevBlockHashes,
     ) -> Result<bool, Error> {
         self.verify_header_bmm(main_block_hash, critical_hash)?;
         if let Some(prev_main_block_hash) = self.client.get_prev_block_hash(main_block_hash)? {
-            if prev_main_block_hash != coinbase_data.prev_main_block_hash {
+            if prev_main_block_hash != prev_block_hashes.prev_main_block_hash {
                 return Ok(false);
             }
         } else {
@@ -366,27 +365,27 @@ impl Drivechain {
         self.db.flush().map_err(|err| err.into())
     }
 
-    pub fn get_deposit_outputs(&self) -> Result<Vec<deposit::Output>, Error> {
+    pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
         self.db.get_deposit_outputs().map_err(|err| err.into())
+    }
+
+    // FIXME: Check network here.
+    pub fn get_withdrawal_data(
+        address: &bitcoin::Address,
+        fee: &bitcoin::Amount,
+    ) -> Result<Vec<u8>, Error> {
+        let hash = match address.payload {
+            bitcoin::util::address::Payload::ScriptHash(hash) => hash,
+            _ => return Err(Error::WrongAddressType),
+        };
+        let fee = fee.as_sat().to_be_bytes().to_vec();
+        let vec = [hash.to_vec(), fee].concat();
+        Ok(vec)
     }
 }
 
-// FIXME: Check network here.
-pub fn get_withdrawal_data(
-    address: &bitcoin::Address,
-    fee: &bitcoin::Amount,
-) -> Result<Vec<u8>, Error> {
-    let hash = match address.payload {
-        bitcoin::util::address::Payload::ScriptHash(hash) => hash,
-        _ => return Err(Error::WrongAddressType),
-    };
-    let fee = fee.as_sat().to_be_bytes().to_vec();
-    let vec = [hash.to_vec(), fee].concat();
-    Ok(vec)
-}
-
 #[derive(Debug)]
-pub struct BMMCache {
+struct BMMCache {
     requests: Vec<BMMRequest>,
     prev_main_block_hash: BlockHash,
 }
@@ -408,7 +407,7 @@ struct BMMRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum BundleStatus {
+enum BundleStatus {
     New,
     Voting,
     Failed,

@@ -32,7 +32,7 @@ mod ffi {
             rpcuser: &str,
             rpcpassword: &str,
         ) -> Result<Box<Drivechain>>;
-        fn get_coinbase_data(&self, prev_side_block_hash: &str) -> Result<Vec<u8>>;
+        fn get_prev_block_hashes(&self, prev_side_block_hash: &str) -> Result<Vec<u8>>;
         fn confirm_bmm(&mut self) -> Result<Vec<Block>>;
         fn attempt_bmm(&mut self, critical_hash: &str, block_data: &str, amount: u64)
             -> Result<()>;
@@ -58,7 +58,7 @@ mod ffi {
             &self,
             main_block_hash: &str,
             critical_hash: &str,
-            coinbase_data: &str,
+            prev_block_hashes: &str,
         ) -> Result<bool>;
         fn get_deposit_outputs(&self) -> Result<Vec<Output>>;
         fn format_deposit_address(&self, address: &str) -> String;
@@ -83,14 +83,14 @@ fn new_drivechain(
 fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>, Error> {
     let address = bitcoin::Address::from_str(address)?;
     let fee = bitcoin::Amount::from_sat(fee);
-    drive::get_withdrawal_data(&address, &fee).map_err(|err| err.into())
+    drive::Drivechain::get_withdrawal_data(&address, &fee).map_err(|err| err.into())
 }
 
 impl Drivechain {
-    fn get_coinbase_data(&self, prev_side_block_hash: &str) -> Result<Vec<u8>, Error> {
+    fn get_prev_block_hashes(&self, prev_side_block_hash: &str) -> Result<Vec<u8>, Error> {
         let prev_side_block_hash = BlockHash::from_str(prev_side_block_hash)?;
-        let coinbase_data = self.0.get_coinbase_data(prev_side_block_hash)?;
-        Ok(coinbase_data.serialize())
+        let prev_block_hashes = self.0.get_prev_block_hashes(prev_side_block_hash)?;
+        Ok(prev_block_hashes.serialize())
     }
 
     fn confirm_bmm(&mut self) -> Result<Vec<ffi::Block>, Error> {
@@ -125,11 +125,7 @@ impl Drivechain {
             .map_err(|err| err.into())
     }
 
-    fn verify_header_bmm(
-        &self,
-        main_block_hash: &str,
-        critical_hash: &str,
-    ) -> Result<bool, Error> {
+    fn verify_header_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
         Ok(self
@@ -142,7 +138,7 @@ impl Drivechain {
         &self,
         main_block_hash: &str,
         critical_hash: &str,
-        coinbase_data: &str,
+        prev_block_hashes: &str,
     ) -> Result<bool, Error> {
         let main_block_hash = BlockHash::from_str(main_block_hash)?;
         let critical_hash = TxMerkleNode::from_str(critical_hash)?;
@@ -153,13 +149,13 @@ impl Drivechain {
         {
             return Ok(false);
         }
-        let coinbase_data = hex::decode(coinbase_data)?;
-        let coinbase_data = match drive::CoinbaseData::deserialize(&coinbase_data) {
+        let prev_block_hashes = hex::decode(prev_block_hashes)?;
+        let prev_block_hashes = match drive::PrevBlockHashes::deserialize(&prev_block_hashes) {
             Some(cb) => cb,
-            None => return Err(Error::CoinbaseDataDeserialize),
+            None => return Err(Error::PrevBlockHashesDeserialize),
         };
         self.0
-            .verify_block_bmm(&main_block_hash, &critical_hash, &coinbase_data)
+            .verify_block_bmm(&main_block_hash, &critical_hash, &prev_block_hashes)
             .map_err(|err| err.into())
     }
 
@@ -194,15 +190,15 @@ impl Drivechain {
         refunds: Vec<String>,
         just_check: bool,
     ) -> Result<bool, Error> {
-        let deposits: Vec<drive::deposit::Output> = deposits
+        let deposits: Vec<drive::Deposit> = deposits
             .iter()
-            .map(|output| drive::deposit::Output {
+            .map(|output| drive::Deposit {
                 address: output.address.clone(),
                 amount: output.amount,
             })
             .collect();
 
-        let withdrawals: Result<HashMap<Vec<u8>, drive::WithdrawalOutput>, Error> = withdrawals
+        let withdrawals: Result<HashMap<Vec<u8>, drive::Withdrawal>, Error> = withdrawals
             .into_iter()
             .map(|w| {
                 let mut dest: [u8; 20] = Default::default();
@@ -212,7 +208,7 @@ impl Drivechain {
                 let mainchain_fee = BigEndian::read_u64(mainchain_fee);
                 Ok((
                     hex::decode(w.outpoint)?,
-                    drive::WithdrawalOutput {
+                    drive::Withdrawal {
                         amount: w.amount,
                         dest,
                         mainchain_fee,
@@ -245,9 +241,9 @@ impl Drivechain {
         refunds: Vec<String>,
         just_check: bool,
     ) -> Result<bool, Error> {
-        let deposits: Vec<drive::deposit::Output> = deposits
+        let deposits: Vec<drive::Deposit> = deposits
             .iter()
-            .map(|deposit| drive::deposit::Output {
+            .map(|deposit| drive::Deposit {
                 address: deposit.address.clone(),
                 amount: deposit.amount,
             })
@@ -291,5 +287,5 @@ enum Error {
     #[error("bitcoin address error")]
     BitcoinAddress(#[from] bitcoin::util::address::Error),
     #[error("failed to deserialize coinbase data")]
-    CoinbaseDataDeserialize,
+    PrevBlockHashesDeserialize,
 }

@@ -1,4 +1,4 @@
-use crate::drive::deposit::Deposit;
+use crate::drive::deposit::MainDeposit;
 use base64::encode;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
@@ -11,7 +11,7 @@ use ureq::json;
 
 use bitcoin::util::psbt::serialize::Serialize;
 
-pub struct DrivechainClient {
+pub struct Client {
     pub this_sidechain: usize,
     pub host: String,
     pub port: usize,
@@ -25,7 +25,7 @@ pub struct VerifiedBMM {
     pub txid: Txid,
 }
 
-impl DrivechainClient {
+impl Client {
     fn send_request(
         &self,
         method: &str,
@@ -233,7 +233,7 @@ impl DrivechainClient {
             .unwrap_or_else(Err)
     }
 
-    pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<Deposit>, Error> {
+    pub fn get_deposits(&self, last_deposit: Option<(Txid, usize)>) -> Result<Vec<MainDeposit>, Error> {
         trace!(
             "requesting deposits since last deposit = {:?}",
             last_deposit
@@ -248,7 +248,7 @@ impl DrivechainClient {
         };
         self.send_request("listsidechaindeposits", &params)
             .map(|value| {
-                let result: Result<Vec<Deposit>, Error> = match value["result"].as_array() {
+                let result: Result<Vec<MainDeposit>, Error> = match value["result"].as_array() {
                     Some(result) => result
                         .iter()
                         .map(|val| {
@@ -288,7 +288,7 @@ impl DrivechainClient {
                                 Some(sd) => sd.into(),
                                 None => return Err(Error::JsonSchema),
                             };
-                            Ok(Deposit {
+                            Ok(MainDeposit {
                                 blockhash,
                                 ntx,
                                 nburnindex,
@@ -316,7 +316,7 @@ impl DrivechainClient {
             })
     }
 
-    pub fn verify_deposit(&self, deposit: &Deposit) -> Result<bool, Error> {
+    pub fn verify_deposit(&self, deposit: &MainDeposit) -> Result<bool, Error> {
         trace!("verifying deposit {:?}", deposit);
         let params = vec![
             json!(deposit.blockhash.to_string()),

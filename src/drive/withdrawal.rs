@@ -1,7 +1,7 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 
 #[derive(Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct WithdrawalOutput {
+pub struct Withdrawal {
     pub mainchain_fee: u64,
     pub height: u64,
     pub dest: [u8; 20],
@@ -26,7 +26,7 @@ pub struct WithdrawalOutput {
 ///
 /// And just for completeness sake we order outputs by amount as well (which is
 /// never actually used).
-impl Ord for WithdrawalOutput {
+impl Ord for Withdrawal {
     fn cmp(&self, other: &Self) -> Ordering {
         if self == other {
             Ordering::Equal
@@ -44,7 +44,7 @@ impl Ord for WithdrawalOutput {
     }
 }
 
-impl PartialOrd for WithdrawalOutput {
+impl PartialOrd for Withdrawal {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
