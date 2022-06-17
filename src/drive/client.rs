@@ -423,6 +423,18 @@ impl Client {
             })
     }
 
+    pub fn get_new_mainchain_address(&self) -> Result<bitcoin::Address, Error> {
+        let params = vec![];
+        self.send_request("getnewaddress", &params)
+            .map(|value| match value["result"].as_str() {
+                Some(address) => {
+                    Ok(bitcoin::Address::from_str(address).map_err(ParseError::BitcoinAddress)?)
+                }
+                None => Err(Error::JsonSchema),
+            })
+            .unwrap_or_else(Err)
+    }
+
     pub fn get_voting_withdrawal_bundle_hashes(&self) -> Result<HashSet<Txid>, Error> {
         let params = vec![json!(self.this_sidechain)];
         self.send_request("listwithdrawalstatus", &params)
@@ -472,6 +484,8 @@ impl Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
+    #[error("bitcoin address parse error")]
+    BitcoinAddress(#[from] bitcoin::util::address::Error),
     #[error("bitcoin parse error")]
     Bitcoin(#[from] bitcoin::consensus::encode::Error),
     #[error("int parse error")]
