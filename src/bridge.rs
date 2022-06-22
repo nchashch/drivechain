@@ -1,10 +1,11 @@
 use crate::drive;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::hex::ToHex;
-use byteorder::{BigEndian, ByteOrder};
 use std::collections::HashMap;
 use std::str::FromStr;
 
+// FIXME: Figure out how to pass std::vector<unsigned char> directly, without
+// hex encoding.
 #[cxx::bridge]
 mod ffi {
     #[derive(Debug)]
@@ -21,7 +22,8 @@ mod ffi {
     #[derive(Debug)]
     struct Withdrawal {
         outpoint: String,
-        withdrawal_data: String,
+        main_address: String,
+        main_fee: u64,
         amount: u64,
     }
     extern "Rust" {
@@ -57,7 +59,8 @@ mod ffi {
         fn verify_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
         fn get_deposit_outputs(&self) -> Result<Vec<Output>>;
         fn format_deposit_address(&self, address: &str) -> String;
-        fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>>;
+        fn extract_mainchain_address_bytes(address: String) -> Result<Vec<u8>>;
+        fn get_new_mainchain_address(&self) -> Result<String>;
         fn flush(&mut self) -> Result<usize>;
     }
 }
@@ -73,12 +76,6 @@ fn new_drivechain(
     let drivechain =
         drive::Drivechain::new(db_path, this_sidechain, rpcuser.into(), rpcpassword.into())?;
     Ok(Box::new(Drivechain(drivechain)))
-}
-
-fn get_withdrawal_data(address: &str, fee: u64) -> Result<Vec<u8>, Error> {
-    let address = bitcoin::Address::from_str(address)?;
-    let fee = bitcoin::Amount::from_sat(fee);
-    drive::Drivechain::get_withdrawal_data(&address, &fee).map_err(|err| err.into())
 }
 
 impl Drivechain {
@@ -172,10 +169,8 @@ impl Drivechain {
             .into_iter()
             .map(|w| {
                 let mut dest: [u8; 20] = Default::default();
-                let withdrawal_data = hex::decode(w.withdrawal_data)?;
-                dest.copy_from_slice(&withdrawal_data[0..20]);
-                let mainchain_fee = &withdrawal_data[20..28];
-                let mainchain_fee = BigEndian::read_u64(mainchain_fee);
+                dest.copy_from_slice(hex::decode(w.main_address)?.as_slice());
+                let mainchain_fee = w.main_fee;
                 Ok((
                     hex::decode(w.outpoint)?,
                     drive::Withdrawal {
@@ -241,9 +236,20 @@ impl Drivechain {
         self.0.format_deposit_address(address)
     }
 
+    fn get_new_mainchain_address(&self) -> Result<String, Error> {
+        let address = self.0.get_new_mainchain_address()?;
+        Ok(address.to_string())
+    }
+
     fn flush(&mut self) -> Result<usize, Error> {
         self.0.flush().map_err(|err| err.into())
     }
+}
+
+fn extract_mainchain_address_bytes(address: String) -> Result<Vec<u8>, Error> {
+    let address = bitcoin::Address::from_str(&address)?;
+    let bytes = drive::Drivechain::extract_mainchain_address_bytes(&address)?;
+    Ok(bytes.to_vec())
 }
 
 #[derive(thiserror::Error, Debug)]

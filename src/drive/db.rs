@@ -137,7 +137,6 @@ impl DB {
                 let height = height + 1;
                 values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
                 for (outpoint, withdrawal) in withdrawals.iter() {
-                    dbg!(hex::encode(outpoint.as_slice()), &withdrawal);
                     let outpoint = outpoint.as_slice();
                     let withdrawal = Withdrawal {
                         height,
@@ -454,7 +453,6 @@ impl DB {
                         Some(balance) => (balance.0, balance.1 + main_amount.as_sat()),
                         None => (0, main_amount.as_sat()),
                     };
-                    dbg!(&address, &balance);
                     let balance = bincode::serialize(&balance).or_else(abort)?;
                     deposit_balances.insert(address.as_bytes(), balance)?;
                     unbalanced_deposits.insert(address.as_bytes(), &[])?;

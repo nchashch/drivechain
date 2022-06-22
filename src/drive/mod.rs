@@ -347,18 +347,19 @@ impl Drivechain {
         self.db.get_deposit_outputs().map_err(|err| err.into())
     }
 
-    // FIXME: Check network here.
-    pub fn get_withdrawal_data(
-        address: &bitcoin::Address,
-        fee: &bitcoin::Amount,
-    ) -> Result<Vec<u8>, Error> {
-        let hash = match address.payload {
-            bitcoin::util::address::Payload::ScriptHash(hash) => hash,
-            _ => return Err(Error::WrongAddressType),
-        };
-        let fee = fee.as_sat().to_be_bytes().to_vec();
-        let vec = [hash.to_vec(), fee].concat();
-        Ok(vec)
+    pub fn extract_mainchain_address_bytes(address: &bitcoin::Address) -> Result<[u8; 20], Error> {
+        match address.payload {
+            bitcoin::util::address::Payload::ScriptHash(bytes) => Ok(bytes.into_inner()),
+            _ => Err(Error::WrongAddressType),
+        }
+    }
+
+    // FIXME: Add a way to check network, so you cannot send mainnet funds to
+    // testnet/regtest address.
+    pub fn get_new_mainchain_address(&self) -> Result<bitcoin::Address, Error> {
+        self.client
+            .get_new_mainchain_address()
+            .map_err(|err| err.into())
     }
 }
 
