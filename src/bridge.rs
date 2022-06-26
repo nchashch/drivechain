@@ -62,6 +62,7 @@ mod ffi {
         fn format_deposit_address(&self, address: &str) -> String;
         fn extract_mainchain_address_bytes(address: String) -> Result<Vec<u8>>;
         fn get_new_mainchain_address(&self) -> Result<String>;
+        fn create_deposit(&self, address: String, amount: u64, fee: u64) -> Result<()>;
         fn flush(&mut self) -> Result<usize>;
     }
 }
@@ -240,6 +241,15 @@ impl Drivechain {
     fn get_new_mainchain_address(&self) -> Result<String, Error> {
         let address = self.0.get_new_mainchain_address()?;
         Ok(address.to_string())
+    }
+
+    fn create_deposit(&self, address: String, amount: u64, fee: u64) -> Result<(), Error> {
+        self.0.create_deposit(
+            &address,
+            bitcoin::Amount::from_sat(amount),
+            bitcoin::Amount::from_sat(fee),
+        )?;
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<usize, Error> {

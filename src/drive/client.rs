@@ -459,6 +459,26 @@ impl Client {
             })
     }
 
+    pub fn create_sidechain_deposit(
+        &self,
+        address: &str,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Txid, Error> {
+        let params = vec![
+            json!(self.this_sidechain),
+            json!(address),
+            json!(amount.to_string_in(bitcoin::Denomination::Bitcoin)),
+            json!(fee.to_string_in(bitcoin::Denomination::Bitcoin)),
+        ];
+        self.send_request("createsidechaindeposit", &params)
+            .map(|value| match value["result"].as_str() {
+                Some(txid) => Ok(Txid::from_str(txid).map_err(ParseError::BitcoinHex)?),
+                None => Err(Error::JsonSchema),
+            })
+            .unwrap_or_else(Err)
+    }
+
     fn collect_nsidechain_txid_pairs(
         array: &[ureq::serde_json::Value],
     ) -> Result<Vec<(usize, Txid)>, Error> {

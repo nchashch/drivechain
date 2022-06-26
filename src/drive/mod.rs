@@ -366,6 +366,17 @@ impl Drivechain {
             .get_new_mainchain_address()
             .map_err(|err| err.into())
     }
+
+    pub fn create_deposit(
+        &self,
+        address: &str,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Txid, Error> {
+        self.client
+            .create_sidechain_deposit(address, amount, fee)
+            .map_err(|err| err.into())
+    }
 }
 
 #[derive(Debug)]
