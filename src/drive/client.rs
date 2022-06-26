@@ -11,6 +11,7 @@ use ureq::json;
 
 use bitcoin::util::psbt::serialize::Serialize;
 
+// TODO: Implement mock client for running unit tests.
 pub struct Client {
     pub this_sidechain: usize,
     pub host: String,

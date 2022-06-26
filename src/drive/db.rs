@@ -161,6 +161,8 @@ impl DB {
     // It might make sense to only create bundles from withdrawal outputs that
     // have some minimum number of confirmations to make it harder to invalidate
     // the current bundle by reorging the sidechain independently of mainchain.
+    //
+    // Or require that a sidechain never reorg unless there was a mainchain reorg.
     pub fn disconnect_withdrawals(&mut self, outpoints: &[Vec<u8>]) -> Result<(), Error> {
         trace!("disconnecting {} withdrawals", outpoints.len());
         (

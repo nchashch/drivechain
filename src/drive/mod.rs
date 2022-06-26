@@ -17,12 +17,15 @@ pub struct Block {
     pub main_block_hash: BlockHash,
 }
 
+// TODO: Implement unit tests.
 pub struct Drivechain {
     client: client::Client,
     bmm_cache: BMMCache,
     db: db::DB,
 }
 
+// TODO: Create a list of errors with error codes and explanations.
+// TODO: Export error code and explanation in FFIs.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("db error")]
@@ -33,6 +36,7 @@ pub enum Error {
     WrongAddressType,
 }
 
+// FIXME: Document public API.
 impl Drivechain {
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(
         db_path: P,
@@ -158,6 +162,7 @@ impl Drivechain {
         format!("{}{}", deposit_address, hash)
     }
 
+    // FIXME: Make this method private. Call it in connect_block and in get_deposit_outputs.
     pub fn update_deposits(&self) -> Result<(), Error> {
         let mut last_deposit = self
             .db

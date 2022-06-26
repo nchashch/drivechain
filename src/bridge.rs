@@ -4,6 +4,7 @@ use bitcoin::hashes::hex::ToHex;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+// FIXME: Move C++ FFI bindings code into a separate crate.
 // FIXME: Figure out how to pass std::vector<unsigned char> directly, without
 // hex encoding.
 #[cxx::bridge]
