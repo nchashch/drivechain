@@ -367,14 +367,16 @@ impl Drivechain {
             .map_err(|err| err.into())
     }
 
+    // FIXME: Pass through actually usable error messages in case of RPC error.
     pub fn create_deposit(
         &self,
         address: &str,
         amount: Amount,
         fee: Amount,
     ) -> Result<Txid, Error> {
+        let address = self.format_deposit_address(address);
         self.client
-            .create_sidechain_deposit(address, amount, fee)
+            .create_sidechain_deposit(&address, amount, fee)
             .map_err(|err| err.into())
     }
 }

@@ -55,14 +55,14 @@ mod ffi {
             just_check: bool,
         ) -> Result<bool>;
         fn attempt_bundle_broadcast(&mut self) -> Result<()>;
-        fn is_outpoint_spent(&self, outpoint: String) -> Result<bool>;
+        fn is_outpoint_spent(&self, outpoint: &str) -> Result<bool>;
         fn is_main_block_connected(&self, main_block_hash: &str) -> Result<bool>;
         fn verify_bmm(&self, main_block_hash: &str, critical_hash: &str) -> Result<bool>;
         fn get_deposit_outputs(&self) -> Result<Vec<Output>>;
         fn format_deposit_address(&self, address: &str) -> String;
-        fn extract_mainchain_address_bytes(address: String) -> Result<Vec<u8>>;
+        fn extract_mainchain_address_bytes(address: &str) -> Result<Vec<u8>>;
         fn get_new_mainchain_address(&self) -> Result<String>;
-        fn create_deposit(&self, address: String, amount: u64, fee: u64) -> Result<()>;
+        fn create_deposit(&self, address: &str, amount: u64, fee: u64) -> Result<String>;
         fn flush(&mut self) -> Result<usize>;
     }
 }
@@ -145,7 +145,7 @@ impl Drivechain {
         Ok(self.0.attempt_bundle_broadcast()?)
     }
 
-    fn is_outpoint_spent(&self, outpoint: String) -> Result<bool, Error> {
+    fn is_outpoint_spent(&self, outpoint: &str) -> Result<bool, Error> {
         let outpoint = hex::decode(outpoint)?;
         self.0
             .is_outpoint_spent(outpoint.as_slice())
@@ -243,13 +243,15 @@ impl Drivechain {
         Ok(address.to_string())
     }
 
-    fn create_deposit(&self, address: String, amount: u64, fee: u64) -> Result<(), Error> {
-        self.0.create_deposit(
-            &address,
-            bitcoin::Amount::from_sat(amount),
-            bitcoin::Amount::from_sat(fee),
-        )?;
-        Ok(())
+    fn create_deposit(&self, address: &str, amount: u64, fee: u64) -> Result<String, Error> {
+        self.0
+            .create_deposit(
+                address,
+                bitcoin::Amount::from_sat(amount),
+                bitcoin::Amount::from_sat(fee),
+            )
+            .map(|txid| txid.to_string())
+            .map_err(|err| err.into())
     }
 
     fn flush(&mut self) -> Result<usize, Error> {
@@ -257,7 +259,7 @@ impl Drivechain {
     }
 }
 
-fn extract_mainchain_address_bytes(address: String) -> Result<Vec<u8>, Error> {
+fn extract_mainchain_address_bytes(address: &str) -> Result<Vec<u8>, Error> {
     let address = bitcoin::Address::from_str(&address)?;
     let bytes = drive::Drivechain::extract_mainchain_address_bytes(&address)?;
     Ok(bytes.to_vec())
