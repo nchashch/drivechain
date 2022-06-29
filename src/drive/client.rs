@@ -479,6 +479,24 @@ impl Client {
             .unwrap_or_else(Err)
     }
 
+    pub fn generate(&self, n: usize) -> Result<Vec<BlockHash>, Error> {
+        let params = vec![json!(n)];
+        self.send_request("generate", &params)
+            .map(|value| match value["result"].as_array() {
+                Some(hashes) => hashes
+                    .iter()
+                    .map(|hash| match hash.as_str() {
+                        Some(hash) => {
+                            Ok(BlockHash::from_str(hash).map_err(ParseError::BitcoinHex)?)
+                        }
+                        None => Err(Error::JsonSchema),
+                    })
+                    .collect(),
+                None => Err(Error::JsonSchema),
+            })
+            .unwrap_or_else(Err)
+    }
+
     fn collect_nsidechain_txid_pairs(
         array: &[ureq::serde_json::Value],
     ) -> Result<Vec<(usize, Txid)>, Error> {

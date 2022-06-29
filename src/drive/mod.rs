@@ -44,6 +44,7 @@ impl Drivechain {
         rpcuser: String,
         rpcpassword: String,
     ) -> Result<Drivechain, Error> {
+        env_logger::init();
         trace!("creating drivechain object");
         const LOCALHOST: &str = "127.0.0.1";
         const MAINCHAIN_PORT: usize = 18443;
@@ -124,14 +125,17 @@ impl Drivechain {
         // and delete all requests with drain method.
         trace!("new blocks on mainchain, checking if sidechain block was bmmed");
         for request in self.bmm_cache.requests.drain(..) {
+            trace!("checking bmm request");
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
+                trace!("bmm request was included in mainchain block");
                 // And we check that critical_hash was actually included in
                 // coinbase on mainchain.
                 if let Ok(verified) = self
                     .client
                     .verify_bmm(&main_block_hash, &request.critical_hash)
                 {
+                    trace!("bmm request was successful");
                     // If we find a bmm request that was accepted we return the
                     // corresponding block data.
                     let block = Block {
@@ -378,6 +382,10 @@ impl Drivechain {
         self.client
             .create_sidechain_deposit(&address, amount, fee)
             .map_err(|err| err.into())
+    }
+
+    pub fn generate(&self, n: usize) -> Result<Vec<BlockHash>, Error> {
+        self.client.generate(n).map_err(|err| err.into())
     }
 }
 

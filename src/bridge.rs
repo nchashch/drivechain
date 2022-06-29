@@ -63,6 +63,7 @@ mod ffi {
         fn extract_mainchain_address_bytes(address: &str) -> Result<Vec<u8>>;
         fn get_new_mainchain_address(&self) -> Result<String>;
         fn create_deposit(&self, address: &str, amount: u64, fee: u64) -> Result<String>;
+        fn generate(&self, n: u64) -> Result<Vec<String>>;
         fn flush(&mut self) -> Result<usize>;
     }
 }
@@ -251,6 +252,13 @@ impl Drivechain {
                 bitcoin::Amount::from_sat(fee),
             )
             .map(|txid| txid.to_string())
+            .map_err(|err| err.into())
+    }
+
+    fn generate(&self, n: u64) -> Result<Vec<String>, Error> {
+        self.0
+            .generate(n as usize)
+            .map(|hashes| hashes.iter().map(|hash| hash.to_string()).collect())
             .map_err(|err| err.into())
     }
 
