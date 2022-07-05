@@ -130,7 +130,6 @@ impl Drivechain {
     }
 
     fn get_deposit_outputs(&self) -> Result<Vec<ffi::Output>, Error> {
-        self.0.update_deposits()?;
         Ok(self
             .0
             .get_deposit_outputs()?

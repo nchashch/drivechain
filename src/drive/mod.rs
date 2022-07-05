@@ -166,8 +166,9 @@ impl Drivechain {
         format!("{}{}", deposit_address, hash)
     }
 
-    // FIXME: Make this method private. Call it in connect_block and in get_deposit_outputs.
-    pub fn update_deposits(&self) -> Result<(), Error> {
+    // Get latest deposits. If height is not None, then don't include deposits
+    // included in mainchain blocks newer than height.
+    fn update_deposits(&self, height: Option<usize>) -> Result<(), Error> {
         let mut last_deposit = self
             .db
             .get_last_deposit()?
@@ -185,6 +186,26 @@ impl Drivechain {
         }
         let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
         let deposits = self.client.get_deposits(last_output)?;
+        let deposits = match height {
+            Some(height) => {
+                // FIXME: Add height field to listsidechaindeposits mainchain
+                // RPC to get rid of this code.
+                let heights: HashMap<BlockHash, usize> = deposits
+                    .iter()
+                    .map(|deposit| {
+                        Ok((
+                            deposit.blockhash,
+                            self.client.get_main_block_height(&deposit.blockhash)?,
+                        ))
+                    })
+                    .collect::<Result<HashMap<BlockHash, usize>, Error>>()?;
+                deposits
+                    .into_iter()
+                    .filter(|deposit| heights[&deposit.blockhash] < height)
+                    .collect()
+            }
+            None => deposits,
+        };
         self.db.update_deposits(deposits.as_slice())?;
         let last_deposit = self
             .db
@@ -303,6 +324,8 @@ impl Drivechain {
         refunds: &[Vec<u8>],
         just_check: bool,
     ) -> Result<(), Error> {
+        let height = self.db.get_last_bmm_commitment_main_block_height()?;
+        self.update_deposits(height)?;
         self.db.connect_deposit_outputs(deposits, just_check)?;
         if !just_check {
             self.db.connect_withdrawals(withdrawals)?;
@@ -331,9 +354,16 @@ impl Drivechain {
         main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
     ) -> Result<client::VerifiedBMM, Error> {
-        self.client
-            .verify_bmm(main_block_hash, critical_hash)
-            .map_err(|err| err.into())
+        let verified = self.client.verify_bmm(main_block_hash, critical_hash)?;
+        let height = self.client.get_main_block_height(main_block_hash)?;
+        let last_height = self
+            .db
+            .get_last_bmm_commitment_main_block_height()?
+            .unwrap_or(0);
+        if height > last_height {
+            self.db.set_last_bmm_commitment_main_block_height(height)?;
+        }
+        Ok(verified)
     }
 
     pub fn is_main_block_connected(&self, main_block_hash: &BlockHash) -> Result<bool, Error> {
@@ -353,6 +383,7 @@ impl Drivechain {
     }
 
     pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
+        self.update_deposits(None)?;
         self.db.get_deposit_outputs().map_err(|err| err.into())
     }
 

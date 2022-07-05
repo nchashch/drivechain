@@ -1,4 +1,4 @@
-use super::deposit::{MainDeposit, Deposit};
+use super::deposit::{Deposit, MainDeposit};
 use super::withdrawal::Withdrawal;
 use bitcoin::blockdata::transaction::OutPoint;
 use bitcoin::blockdata::{
@@ -28,10 +28,12 @@ const SPENT_BUNDLE_HASHES: &[u8] = b"spent_bundle_hashes";
 
 const VALUES: &[u8] = b"values";
 
-// Current block height.
-const BLOCK_HEIGHT: &[u8] = b"block_height";
+// Current sidechain block height.
+const SIDE_BLOCK_HEIGHT: &[u8] = b"side_block_height";
 // Height at which last bundle has either failed or been spent.
 const LAST_FAILED_BUNDLE_HEIGHT: &[u8] = b"last_failed_bundle_height";
+// Mainchain block height of the last known bmm commitment.
+const LAST_BMM_COMMITMENT_MAIN_BLOCK_HEIGHT: &[u8] = b"last_bmm_commitment_main_block_height";
 
 pub struct DB {
     db: sled::Db,
@@ -50,6 +52,7 @@ pub struct DB {
     // Store for values like:
     // block_height
     // last_failed_bundle_height
+    // last_valid_bmm_main_block_height
     values: sled::Tree,
 }
 
@@ -123,7 +126,7 @@ impl DB {
             &self.values,
         )
             .transaction(|(outpoint_to_withdrawal, unspent_outpoints, values)| {
-                let height = match values.get(BLOCK_HEIGHT)? {
+                let height = match values.get(SIDE_BLOCK_HEIGHT)? {
                     Some(bytes) => {
                         let array: [u8; 8] = bytes
                             .as_ref()
@@ -135,7 +138,7 @@ impl DB {
                     None => 0,
                 };
                 let height = height + 1;
-                values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
+                values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
                 for (outpoint, withdrawal) in withdrawals.iter() {
                     let outpoint = outpoint.as_slice();
                     let withdrawal = Withdrawal {
@@ -173,7 +176,7 @@ impl DB {
         )
             .transaction(
                 |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints, values)| {
-                    let height = match values.get(BLOCK_HEIGHT)? {
+                    let height = match values.get(SIDE_BLOCK_HEIGHT)? {
                         Some(bytes) => {
                             let array: [u8; 8] = bytes
                                 .as_ref()
@@ -185,7 +188,7 @@ impl DB {
                         None => return abort(DisconnectError::Genesis.into()),
                     };
                     let height = height - 1;
-                    values.insert(BLOCK_HEIGHT, &height.to_be_bytes())?;
+                    values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
                     for outpoint in outpoints.iter() {
                         let outpoint = outpoint.as_slice();
                         outpoint_to_withdrawal.remove(outpoint)?;
@@ -294,6 +297,15 @@ impl DB {
                             old_side_balance
                         );
                         let new_side_balance = old_side_balance + side_delta;
+                        // FIXME: If a new deposit is added after a block was
+                        // generated and before it was connected this will fail.
+                        //
+                        // This will happen if we:
+                        //
+                        // 1. generate a sidechain block and call attempt_bmm
+                        // 2. create a new deposit
+                        // 3. mine a mainchain block
+                        // 4. call confirm_bmm
                         if new_side_balance != main_balance {
                             return abort(
                                 ConnectError::Unbalanced {
@@ -374,6 +386,21 @@ impl DB {
                 Error::Disconnect(DisconnectError::JustChecking) => Ok(()),
                 err => Err(err),
             })
+    }
+
+    pub fn set_last_bmm_commitment_main_block_height(&self, height: usize) -> Result<(), Error> {
+        self.values.insert(
+            LAST_BMM_COMMITMENT_MAIN_BLOCK_HEIGHT,
+            &(height as u64).to_be_bytes(),
+        )?;
+        Ok(())
+    }
+
+    pub fn get_last_bmm_commitment_main_block_height(&self) -> Result<Option<usize>, Error> {
+        Ok(self
+            .values
+            .get(LAST_BMM_COMMITMENT_MAIN_BLOCK_HEIGHT)?
+            .map(|height| BigEndian::read_u64(&height) as usize))
     }
 
     pub fn update_deposits(&self, deposits: &[MainDeposit]) -> Result<(), Error> {
@@ -593,7 +620,7 @@ impl DB {
                         spent_outpoints.remove(input.as_slice())?;
                         unspent_outpoints.insert(input.as_slice(), &[])?;
                     }
-                    let last_failed_bundle_height = match values.get(BLOCK_HEIGHT)? {
+                    let last_failed_bundle_height = match values.get(SIDE_BLOCK_HEIGHT)? {
                         Some(height) => height,
                         None => return abort(Error::NoBlockHeight),
                     };
@@ -605,7 +632,7 @@ impl DB {
     }
 
     pub fn get_blocks_since_last_failed_bundle(&self) -> Result<usize, Error> {
-        let block_height = match self.values.get(BLOCK_HEIGHT)? {
+        let block_height = match self.values.get(SIDE_BLOCK_HEIGHT)? {
             Some(block_height) => BigEndian::read_u64(&block_height) as usize,
             // No block height set means we are at genesis block.
             None => 0,

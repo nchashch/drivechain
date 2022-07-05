@@ -79,6 +79,19 @@ impl Client {
             .unwrap_or_else(Err)
     }
 
+    pub fn get_main_block_height(&self, main_block_hash: &BlockHash) -> Result<usize, Error> {
+        let params = vec![json!(main_block_hash.to_string())];
+        self.send_request("getblock", &params)
+            .map(|value| {
+                let height = match value["result"]["height"].as_u64() {
+                    Some(c) => c,
+                    None => return Err(Error::JsonSchema),
+                };
+                Ok(height as usize)
+            })
+            .unwrap_or_else(Err)
+    }
+
     // check that a block was successfuly bmmed
     pub fn verify_bmm(
         &self,
