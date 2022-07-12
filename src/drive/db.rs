@@ -682,9 +682,6 @@ impl DB {
 
     // FIXME: Add cutoff for maximum number of withdrawal outputs.
     //
-    // FIXME: Set mainchain fee to latest fee, not to maximum fee for aggregated
-    // withdrawal outputs.
-    //
     // TODO: Investigate possibility of determining mainchain fee automatically.
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
         trace!("creating a new bundle from unspent withdrawals in db",);
@@ -709,8 +706,10 @@ impl DB {
                 dest_to_withdrawal.entry(output.dest).or_insert((0, 0, 0));
             // Add up all amounts.
             *amount += output.amount;
-            // Set the maximum mainchain fee.
-            *mainchain_fee = std::cmp::max(*mainchain_fee, output.mainchain_fee);
+            // Set the newest mainchain fee.
+            if *height < output.height {
+                *mainchain_fee = output.mainchain_fee;
+            }
             // Height is only used for sorting so at this point it doesn't
             // matter, but we set it to the lowest one anyway just to have a
             // reasonable value for Withdrawal::height later.
