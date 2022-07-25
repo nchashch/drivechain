@@ -316,7 +316,6 @@ impl Drivechain {
         })
     }
 
-    // FIXME: Make connect_block and disconnect block atomic.
     pub fn connect_block(
         &mut self,
         deposits: &[Deposit],
@@ -326,11 +325,8 @@ impl Drivechain {
     ) -> Result<(), Error> {
         let height = self.db.get_last_bmm_commitment_main_block_height()?;
         self.update_deposits(height)?;
-        self.db.connect_deposit_outputs(deposits, just_check)?;
-        if !just_check {
-            self.db.connect_withdrawals(withdrawals)?;
-            self.db.connect_refunds(refunds)?;
-        }
+        self.db
+            .connect_block(deposits, withdrawals, refunds, just_check)?;
         Ok(())
     }
 
@@ -341,11 +337,8 @@ impl Drivechain {
         refunds: &[Vec<u8>],
         just_check: bool,
     ) -> Result<(), Error> {
-        self.db.disconnect_deposit_outputs(deposits, just_check)?;
-        if !just_check {
-            self.db.disconnect_withdrawals(withdrawals)?;
-            self.db.disconnect_refunds(refunds)?;
-        }
+        self.db
+            .disconnect_block(deposits, withdrawals, refunds, just_check)?;
         Ok(())
     }
 

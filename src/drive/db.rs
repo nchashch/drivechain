@@ -115,67 +115,221 @@ impl DB {
         deposit_outputs
     }
 
-    pub fn connect_withdrawals(
+    pub fn connect_block(
         &mut self,
+        deposits: &[Deposit],
         withdrawals: &HashMap<Vec<u8>, Withdrawal>,
+        refunds: &[Vec<u8>],
+        just_check: bool,
     ) -> Result<(), Error> {
-        trace!("connecting {} withdrawals", withdrawals.len());
         (
-            &self.outpoint_to_withdrawal,
-            &self.unspent_outpoints,
-            &self.values,
-        )
-            .transaction(|(outpoint_to_withdrawal, unspent_outpoints, values)| {
-                let height = match values.get(SIDE_BLOCK_HEIGHT)? {
-                    Some(bytes) => {
-                        let array: [u8; 8] = bytes
-                            .as_ref()
-                            .try_into()
-                            .map_err(|err: std::array::TryFromSliceError| err.into())
-                            .or_else(abort)?;
-                        u64::from_be_bytes(array)
-                    }
-                    None => 0,
-                };
-                let height = height + 1;
-                values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
-                for (outpoint, withdrawal) in withdrawals.iter() {
-                    let outpoint = outpoint.as_slice();
-                    let withdrawal = Withdrawal {
-                        height,
-                        ..*withdrawal
-                    };
-                    let withdrawal = bincode::serialize(&withdrawal)
-                        .map_err(|err| err.into())
-                        .or_else(abort)?;
-                    outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
-                    unspent_outpoints.insert(outpoint, &[])?;
-                }
-                trace!("withdrawals connected");
-                Ok(())
-            })
-            .map_err(|err: TransactionError<Error>| err.into())
-    }
-
-    // FIXME: It should be impossible to disconnect spent withdrawals if on
-    // mainchain the bundle that spends the corresponding outpoints is not
-    // disconnected as well.
-    //
-    // It might make sense to only create bundles from withdrawal outputs that
-    // have some minimum number of confirmations to make it harder to invalidate
-    // the current bundle by reorging the sidechain independently of mainchain.
-    //
-    // Or require that a sidechain never reorg unless there was a mainchain reorg.
-    pub fn disconnect_withdrawals(&mut self, outpoints: &[Vec<u8>]) -> Result<(), Error> {
-        trace!("disconnecting {} withdrawals", outpoints.len());
-        (
+            // deposits
+            &self.deposit_balances,
+            &self.unbalanced_deposits,
+            // withdrawals and refunds
             &self.outpoint_to_withdrawal,
             &self.unspent_outpoints,
             &self.spent_outpoints,
             &self.values,
         )
             .transaction(
-                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints, values)| {
+                |(
+                    // deposits
+                    deposit_balances,
+                    unbalanced_deposits,
+                    // withdrawals
+                    outpoint_to_withdrawal,
+                    unspent_outpoints,
+                    spent_outpoints,
+                    values,
+                )| {
+                    trace!(
+                        "connecting {} deposit outputs{}",
+                        deposits.len(),
+                        match just_check {
+                            true => " (just checking)",
+                            false => "",
+                        }
+                    );
+                    let mut side_balances = HashMap::<String, u64>::new();
+                    for output in deposits {
+                        let amount = side_balances.entry(output.address.clone()).or_insert(0);
+                        *amount += output.amount;
+                    }
+                    for (address, side_delta) in side_balances.iter() {
+                        if let Some(balance) = deposit_balances.get(address.as_bytes())? {
+                            let (old_side_balance, main_balance) =
+                                bincode::deserialize::<(u64, u64)>(&balance)
+                                    .map_err(Error::from)
+                                    .or_else(abort)?;
+                            trace!(
+                                "main balance is {}. added {} to old side balance {}",
+                                main_balance,
+                                side_delta,
+                                old_side_balance
+                            );
+                            let new_side_balance = old_side_balance + side_delta;
+                            // FIXME: If a new deposit is added after a block was
+                            // generated and before it was connected this will fail.
+                            //
+                            // This will happen if we:
+                            //
+                            // 1. generate a sidechain block and call attempt_bmm
+                            // 2. create a new deposit
+                            // 3. mine a mainchain block
+                            // 4. call confirm_bmm
+                            if new_side_balance != main_balance {
+                                return abort(
+                                    ConnectError::Unbalanced {
+                                        address: address.clone(),
+                                        side_balance: bitcoin::Amount::from_sat(new_side_balance),
+                                        main_balance: bitcoin::Amount::from_sat(main_balance),
+                                    }
+                                    .into(),
+                                );
+                            }
+                            let new_balance = (new_side_balance, main_balance);
+                            let new_balance = bincode::serialize(&new_balance)
+                                .map_err(Error::from)
+                                .or_else(abort)?;
+                            deposit_balances.insert(address.as_bytes(), new_balance)?;
+                            unbalanced_deposits.remove(address.as_bytes())?;
+                        } else {
+                            return abort(ConnectError::NoAddress(address.clone()).into());
+                        }
+                    }
+                    trace!("deposit outputs connected");
+
+                    trace!("connecting {} withdrawals", withdrawals.len());
+                    let height = match values.get(SIDE_BLOCK_HEIGHT)? {
+                        Some(bytes) => {
+                            let array: [u8; 8] = bytes
+                                .as_ref()
+                                .try_into()
+                                .map_err(|err: std::array::TryFromSliceError| err.into())
+                                .or_else(abort)?;
+                            u64::from_be_bytes(array)
+                        }
+                        None => 0,
+                    };
+                    let height = height + 1;
+                    values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
+                    for (outpoint, withdrawal) in withdrawals.iter() {
+                        let outpoint = outpoint.as_slice();
+                        let withdrawal = Withdrawal {
+                            height,
+                            ..*withdrawal
+                        };
+                        let withdrawal = bincode::serialize(&withdrawal)
+                            .map_err(|err| err.into())
+                            .or_else(abort)?;
+                        outpoint_to_withdrawal.insert(outpoint, withdrawal)?;
+                        unspent_outpoints.insert(outpoint, &[])?;
+                    }
+                    trace!("withdrawals connected");
+
+                    // FIXME: Add separate refunded_outpoints store to allow checking spent
+                    // bundle validity.
+                    trace!("connecting {} refunds", refunds.len());
+                    for outpoint in refunds.iter() {
+                        let outpoint = outpoint.as_slice();
+                        if outpoint_to_withdrawal.get(outpoint)?.is_none() {
+                            continue;
+                        }
+                        if unspent_outpoints.remove(outpoint)?.is_some() {
+                            spent_outpoints.insert(outpoint, &[])?;
+                        }
+                    }
+                    trace!("refunds connected");
+
+                    if just_check {
+                        // Don't commit changes to db if we are just checking.
+                        trace!("block can be connected without errors");
+                        return abort(ConnectError::JustChecking.into());
+                    }
+                    trace!("block connected");
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.into())
+            .or_else(|err| match err {
+                Error::Connect(ConnectError::JustChecking) => Ok(()),
+                err => Err(err),
+            })
+    }
+
+    pub fn disconnect_block(
+        &mut self,
+        deposits: &[Deposit],
+        withdrawals: &[Vec<u8>],
+        refunds: &[Vec<u8>],
+        just_check: bool,
+    ) -> Result<(), Error> {
+        trace!(
+            "disconnecting {} deposit outputs{}",
+            deposits.len(),
+            match just_check {
+                true => " (just checking)",
+                false => "",
+            }
+        );
+        let mut side_balances = HashMap::<String, u64>::new();
+        for output in deposits {
+            let amount = side_balances.entry(output.address.clone()).or_insert(0);
+            *amount += output.amount;
+        }
+        (
+            // deposits
+            &self.deposit_balances,
+            &self.unbalanced_deposits,
+            // withdrawals and refunds
+            &self.outpoint_to_withdrawal,
+            &self.unspent_outpoints,
+            &self.spent_outpoints,
+            &self.values,
+        )
+            .transaction(
+                |(
+                    // deposits
+                    deposit_balances,
+                    unbalanced_deposits,
+                    // withdrawals and refunds
+                    outpoint_to_withdrawal,
+                    unspent_outpoints,
+                    spent_outpoints,
+                    values,
+                )| {
+                    for (address, side_delta) in side_balances.iter() {
+                        if let Some(balance) = deposit_balances.get(address.as_bytes())? {
+                            let (old_side_balance, main_balance) =
+                                bincode::deserialize::<(u64, u64)>(&balance)
+                                    .map_err(Error::from)
+                                    .or_else(abort)?;
+                            let new_side_balance = old_side_balance - side_delta;
+                            if !just_check {
+                                let new_balance = (new_side_balance, main_balance);
+                                let new_balance = bincode::serialize(&new_balance)
+                                    .map_err(Error::from)
+                                    .or_else(abort)?;
+                                deposit_balances.insert(address.as_bytes(), new_balance)?;
+                                unbalanced_deposits.insert(address.as_bytes(), &[])?;
+                            }
+                        } else {
+                            return abort(DisconnectError::NoDepositInDB(address.clone()).into());
+                        }
+                    }
+                    trace!("deposit outputs disconnected");
+
+                    // FIXME: It should be impossible to disconnect spent withdrawals if on
+                    // mainchain the bundle that spends the corresponding outpoints is not
+                    // disconnected as well.
+                    //
+                    // It might make sense to only create bundles from withdrawal outputs that
+                    // have some minimum number of confirmations to make it harder to invalidate
+                    // the current bundle by reorging the sidechain independently of mainchain.
+                    //
+                    // Or require that a sidechain never reorg unless there was a mainchain reorg.
+                    trace!("disconnecting {} withdrawals", withdrawals.len());
                     let height = match values.get(SIDE_BLOCK_HEIGHT)? {
                         Some(bytes) => {
                             let array: [u8; 8] = bytes
@@ -189,61 +343,16 @@ impl DB {
                     };
                     let height = height - 1;
                     values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
-                    for outpoint in outpoints.iter() {
+                    for outpoint in withdrawals.iter() {
                         let outpoint = outpoint.as_slice();
                         outpoint_to_withdrawal.remove(outpoint)?;
                         unspent_outpoints.remove(outpoint)?;
                         spent_outpoints.remove(outpoint)?;
                     }
                     trace!("withdrawals disconnected");
-                    Ok(())
-                },
-            )
-            .map_err(|err: TransactionError<Error>| err.into())
-    }
 
-    // FIXME: Add separate refunded_outpoints store to allow checking spent
-    // bundle validity.
-    pub fn connect_refunds(&mut self, refund_outpoints: &[Vec<u8>]) -> Result<(), Error> {
-        trace!("connecting {} refunds", refund_outpoints.len());
-        (
-            &self.outpoint_to_withdrawal,
-            &self.unspent_outpoints,
-            &self.spent_outpoints,
-        )
-            .transaction(
-                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
-                    for outpoint in refund_outpoints.iter() {
-                        let outpoint = outpoint.as_slice();
-                        if outpoint_to_withdrawal.get(outpoint)?.is_none() {
-                            continue;
-                        }
-                        if unspent_outpoints.remove(outpoint)?.is_some() {
-                            spent_outpoints.insert(outpoint, &[])?;
-                        }
-                    }
-                    trace!("refunds connected");
-                    Ok(())
-                },
-            )
-            .or_else(|err: TransactionError| match err {
-                TransactionError::Storage(err) => Err(err.into()),
-                // NOTE: This transaction is never aborted, so this branch will
-                // never be evaluated.
-                TransactionError::Abort(_) => Ok(()),
-            })
-    }
-
-    pub fn disconnect_refunds(&mut self, refund_outpoints: &[Vec<u8>]) -> Result<(), Error> {
-        trace!("disconnecting {} refunds", refund_outpoints.len());
-        (
-            &self.outpoint_to_withdrawal,
-            &self.unspent_outpoints,
-            &self.spent_outpoints,
-        )
-            .transaction(
-                |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
-                    for outpoint in refund_outpoints.iter() {
+                    trace!("disconnecting {} refunds", refunds.len());
+                    for outpoint in refunds.iter() {
                         let outpoint = outpoint.as_slice();
                         if outpoint_to_withdrawal.get(outpoint)?.is_none() {
                             continue;
@@ -253,134 +362,14 @@ impl DB {
                         }
                     }
                     trace!("refunds disconnected");
+                    if just_check {
+                        trace!("block can be disconnected without errors");
+                        return abort(DisconnectError::JustChecking.into());
+                    }
+                    trace!("block disconnected");
                     Ok(())
                 },
             )
-            .or_else(|err: TransactionError| match err {
-                TransactionError::Storage(err) => Err(err.into()),
-                // NOTE: This transaction is never aborted, so this branch will
-                // never be evaluated.
-                TransactionError::Abort(_) => Ok(()),
-            })
-    }
-
-    pub fn connect_deposit_outputs(
-        &mut self,
-        outputs: &[Deposit],
-        just_check: bool,
-    ) -> Result<(), Error> {
-        trace!(
-            "connecting {} deposit outputs{}",
-            outputs.len(),
-            match just_check {
-                true => " (just checking)",
-                false => "",
-            }
-        );
-        let mut side_balances = HashMap::<String, u64>::new();
-        for output in outputs {
-            let amount = side_balances.entry(output.address.clone()).or_insert(0);
-            *amount += output.amount;
-        }
-        (&self.deposit_balances, &self.unbalanced_deposits)
-            .transaction(|(deposit_balances, unbalanced_deposits)| {
-                for (address, side_delta) in side_balances.iter() {
-                    if let Some(balance) = deposit_balances.get(address.as_bytes())? {
-                        let (old_side_balance, main_balance) =
-                            bincode::deserialize::<(u64, u64)>(&balance)
-                                .map_err(Error::from)
-                                .or_else(abort)?;
-                        trace!(
-                            "main balance is {}. added {} to old side balance {}",
-                            main_balance,
-                            side_delta,
-                            old_side_balance
-                        );
-                        let new_side_balance = old_side_balance + side_delta;
-                        // FIXME: If a new deposit is added after a block was
-                        // generated and before it was connected this will fail.
-                        //
-                        // This will happen if we:
-                        //
-                        // 1. generate a sidechain block and call attempt_bmm
-                        // 2. create a new deposit
-                        // 3. mine a mainchain block
-                        // 4. call confirm_bmm
-                        if new_side_balance != main_balance {
-                            return abort(
-                                ConnectError::Unbalanced {
-                                    address: address.clone(),
-                                    side_balance: bitcoin::Amount::from_sat(new_side_balance),
-                                    main_balance: bitcoin::Amount::from_sat(main_balance),
-                                }
-                                .into(),
-                            );
-                        }
-                        let new_balance = (new_side_balance, main_balance);
-                        let new_balance = bincode::serialize(&new_balance)
-                            .map_err(Error::from)
-                            .or_else(abort)?;
-                        deposit_balances.insert(address.as_bytes(), new_balance)?;
-                        unbalanced_deposits.remove(address.as_bytes())?;
-                    } else {
-                        return abort(ConnectError::NoAddress(address.clone()).into());
-                    }
-                }
-                if just_check {
-                    return abort(ConnectError::JustChecking.into());
-                }
-                trace!("deposit outputs connected");
-                Ok(())
-            })
-            .map_err(|err| err.into())
-            .or_else(|err| match err {
-                Error::Connect(ConnectError::JustChecking) => Ok(()),
-                err => Err(err),
-            })
-    }
-
-    pub fn disconnect_deposit_outputs(
-        &mut self,
-        outputs: &[Deposit],
-        just_check: bool,
-    ) -> Result<(), Error> {
-        trace!(
-            "disconnecting {} deposit outputs{}",
-            outputs.len(),
-            match just_check {
-                true => " (just checking)",
-                false => "",
-            }
-        );
-        let mut side_balances = HashMap::<String, u64>::new();
-        for output in outputs {
-            let amount = side_balances.entry(output.address.clone()).or_insert(0);
-            *amount += output.amount;
-        }
-        (&self.deposit_balances, &self.unbalanced_deposits)
-            .transaction(|(deposit_balances, unbalanced_deposits)| {
-                for (address, side_delta) in side_balances.iter() {
-                    if let Some(balance) = deposit_balances.get(address.as_bytes())? {
-                        let (old_side_balance, main_balance) =
-                            bincode::deserialize::<(u64, u64)>(&balance)
-                                .map_err(Error::from)
-                                .or_else(abort)?;
-                        let new_side_balance = old_side_balance - side_delta;
-                        if !just_check {
-                            let new_balance = (new_side_balance, main_balance);
-                            let new_balance = bincode::serialize(&new_balance)
-                                .map_err(Error::from)
-                                .or_else(abort)?;
-                            deposit_balances.insert(address.as_bytes(), new_balance)?;
-                            unbalanced_deposits.insert(address.as_bytes(), &[])?;
-                        }
-                    } else {
-                        return abort(DisconnectError::JustChecking.into());
-                    }
-                }
-                trace!("deposit outputs disconnected");
-                Ok(())
-            })
             .map_err(|err| err.into())
             .or_else(|err| match err {
                 Error::Disconnect(DisconnectError::JustChecking) => Ok(()),
@@ -857,6 +846,8 @@ pub enum ConnectError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DisconnectError {
+    #[error("deposit to address {0} doesn't exist in db")]
+    NoDepositInDB(String),
     #[error("just checking")]
     JustChecking,
     #[error("cannot disconnect genesis block")]
