@@ -82,7 +82,6 @@ impl Drivechain {
     pub fn attempt_bmm(
         &mut self,
         critical_hash: &TxMerkleNode,
-        block_data: &[u8],
         amount: Amount,
     ) -> Result<(), Error> {
         trace!(
@@ -98,7 +97,6 @@ impl Drivechain {
         let bmm_request = BMMRequest {
             txid,
             critical_hash: *critical_hash,
-            side_block_data: block_data.to_vec(),
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
@@ -107,7 +105,7 @@ impl Drivechain {
     }
 
     // Check if any bmm request was accepted.
-    pub fn confirm_bmm(&mut self) -> Result<Option<Block>, Error> {
+    pub fn confirm_bmm(&mut self) -> Result<BMMState, Error> {
         let mainchain_tip_hash = self.client.get_mainchain_tip()?;
         trace!(
             "attempting to confirm that a block was bmmed at mainchain tip = {}",
@@ -117,7 +115,7 @@ impl Drivechain {
             trace!("no new blocks on mainchain so sidechain block wasn't bmmed");
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
-            return Ok(None);
+            return Ok(BMMState::Pending);
         }
         // Mainchain tip has changed so all requests for previous tip are now
         // invalid hence we update our prev_main_block_hash
@@ -139,13 +137,6 @@ impl Drivechain {
                     .verify_bmm(&main_block_hash, &request.critical_hash)
                 {
                     trace!("bmm request was successful");
-                    // If we find a bmm request that was accepted we return the
-                    // corresponding block data.
-                    let block = Block {
-                        data: request.side_block_data,
-                        time: verified.time,
-                        main_block_hash,
-                    };
                     info!(
                         "sidechain block {} was successfuly bmmed in mainchain block {} at {}",
                         &request.critical_hash,
@@ -155,11 +146,12 @@ impl Drivechain {
                                 + std::time::Duration::from_secs(verified.time as u64)
                         ),
                     );
-                    return Ok(Some(block));
+                    return Ok(BMMState::Succeded);
                 }
             }
         }
-        Ok(None)
+        trace!("no sidechain block was bmmed");
+        Ok(BMMState::Failed)
     }
 
     pub fn format_deposit_address(&self, str_dest: &str) -> String {
@@ -376,6 +368,7 @@ impl Drivechain {
     }
 
     pub fn flush(&mut self) -> Result<usize, Error> {
+        trace!("flushing the db");
         self.db.flush().map_err(|err| err.into())
     }
 
@@ -433,10 +426,16 @@ impl BMMCache {
 }
 
 #[derive(Debug)]
+pub enum BMMState {
+    Succeded,
+    Failed,
+    Pending,
+}
+
+#[derive(Debug)]
 struct BMMRequest {
     txid: Txid,
     critical_hash: TxMerkleNode,
-    side_block_data: Vec<u8>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
