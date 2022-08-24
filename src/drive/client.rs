@@ -92,6 +92,20 @@ impl Client {
             .unwrap_or_else(Err)
     }
 
+    pub fn get_next_main_block(
+        &self,
+        prev_main_block_hash: &BlockHash,
+    ) -> Result<BlockHash, Error> {
+        let params = vec![json!(prev_main_block_hash.to_string())];
+        self.send_request("getblock", &params)
+            .map(|value| match &value["nextblockhash"] {
+                ureq::serde_json::Value::String(main_block_hash) => {
+                    Ok(BlockHash::from_str(main_block_hash).map_err(ParseError::BitcoinHex)?)
+                }
+                _ => Err(Error::NoNextBlock),
+            })?
+    }
+
     // check that a block was successfuly bmmed
     pub fn verify_bmm(
         &self,
@@ -181,26 +195,12 @@ impl Client {
     // get active mainchain tip
     pub fn get_mainchain_tip(&self) -> Result<BlockHash, Error> {
         let params = vec![];
-        self.send_request("getchaintips", &params)
-            .map(|value| {
-                let result = match value["result"].as_array() {
-                    Some(result) => result,
-                    None => return Err(Error::JsonSchema),
-                };
-                for tip in result {
-                    if tip["status"] == "active" {
-                        let hash = match tip["hash"].as_str() {
-                            Some(hash) => hash,
-                            None => return Err(Error::JsonSchema),
-                        };
-                        let active_tip = match BlockHash::from_str(hash) {
-                            Ok(hash) => hash,
-                            Err(err) => return Err(Error::Parse(err.into())),
-                        };
-                        return Ok(active_tip);
-                    }
+        self.send_request("getbestblockhash", &params)
+            .map(|value| match &value["result"] {
+                ureq::serde_json::Value::String(main_block_hash) => {
+                    Ok(BlockHash::from_str(main_block_hash).map_err(ParseError::BitcoinHex)?)
                 }
-                Err(RpcError::NoMainchainTip.into())
+                _ => Err(RpcError::NoMainchainTip.into()),
             })
             .unwrap_or_else(Err)
     }
@@ -570,6 +570,8 @@ pub enum Error {
     Rpc(#[from] RpcError),
     #[error("json schema error")]
     JsonSchema,
+    #[error("next block wasn't mined yet")]
+    NoNextBlock,
     #[error("genesis block doesn't have previous block")]
     GenesisBlock,
 }

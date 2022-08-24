@@ -4,7 +4,7 @@ mod deposit;
 mod withdrawal;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::util::amount::Amount;
+use bitcoin::Amount;
 pub use deposit::Deposit;
 use log::{info, trace};
 use std::collections::HashMap;
@@ -41,8 +41,8 @@ impl Drivechain {
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(
         db_path: P,
         this_sidechain: usize,
-        rpcuser: String,
-        rpcpassword: String,
+        rpcuser: &str,
+        rpcpassword: &str,
     ) -> Result<Drivechain, Error> {
         env_logger::init();
         trace!("creating drivechain object");
@@ -53,8 +53,8 @@ impl Drivechain {
             this_sidechain,
             host: LOCALHOST.into(),
             port: MAINCHAIN_PORT,
-            rpcuser,
-            rpcpassword,
+            rpcuser: rpcuser.to_string(),
+            rpcpassword: rpcpassword.to_string(),
         };
 
         trace!("drivechain object created successfuly");
@@ -125,7 +125,10 @@ impl Drivechain {
         // and delete all requests with drain method.
         trace!("new blocks on mainchain, checking if sidechain block was bmmed");
         for request in self.bmm_cache.requests.drain(..) {
-            trace!("checking bmm request");
+            trace!(
+                "checking bmm request for side:block hash = {}",
+                request.critical_hash
+            );
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
                 trace!("bmm request was included in mainchain block");
@@ -344,11 +347,12 @@ impl Drivechain {
 
     pub fn verify_bmm(
         &self,
-        main_block_hash: &BlockHash,
+        prev_main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
     ) -> Result<client::VerifiedBMM, Error> {
-        let verified = self.client.verify_bmm(main_block_hash, critical_hash)?;
-        let height = self.client.get_main_block_height(main_block_hash)?;
+        let main_block_hash = self.client.get_next_main_block(prev_main_block_hash)?;
+        let verified = self.client.verify_bmm(&main_block_hash, critical_hash)?;
+        let height = self.client.get_main_block_height(&main_block_hash)?;
         let last_height = self
             .db
             .get_last_bmm_commitment_main_block_height()?
