@@ -57,10 +57,13 @@ impl Drivechain {
             rpcpassword: rpcpassword.to_string(),
         };
 
+        let mut bmm_cache = BMMCache::new();
+        let mainchain_tip_hash = client.get_mainchain_tip()?;
+        bmm_cache.prev_main_block_hash = mainchain_tip_hash;
         trace!("drivechain object created successfuly");
         Ok(Drivechain {
             client,
-            bmm_cache: BMMCache::new(),
+            bmm_cache,
             db: db::DB::new(db_path)?,
         })
     }
