@@ -85,6 +85,7 @@ impl Drivechain {
     pub fn attempt_bmm(
         &mut self,
         critical_hash: &TxMerkleNode,
+        prev_main_block_hash: &BlockHash,
         amount: Amount,
     ) -> Result<(), Error> {
         trace!(
@@ -99,10 +100,12 @@ impl Drivechain {
             .send_bmm_request(critical_hash, &mainchain_tip_hash, 0, amount)?;
         let bmm_request = BMMRequest {
             txid,
+            prev_main_block_hash: *prev_main_block_hash,
             critical_hash: *critical_hash,
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
+        self.bmm_cache.prev_main_block_hash = *prev_main_block_hash;
         trace!("bmm request was created successfuly txid = {}", txid);
         Ok(())
     }
@@ -121,9 +124,7 @@ impl Drivechain {
             return Ok(BMMState::Pending);
         }
         // Mainchain tip has changed so all requests for previous tip are now
-        // invalid hence we update our prev_main_block_hash
-        self.bmm_cache.prev_main_block_hash = mainchain_tip_hash;
-        // and delete all requests with drain method.
+        // delete all requests with drain method.
         trace!("new blocks on mainchain, checking if sidechain block was bmmed");
         for request in self.bmm_cache.requests.drain(..) {
             trace!(
@@ -132,7 +133,13 @@ impl Drivechain {
             );
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
-                trace!("bmm request was included in mainchain block");
+                trace!("bmm commitment was included in mainchain block");
+                if self.client.get_prev_block_hash(&main_block_hash)?
+                    != request.prev_main_block_hash
+                {
+                    trace!("bmm commitment is invalid because the mainchain block doesn't follow previous mainchcain block");
+                    continue;
+                }
                 // And we check that critical_hash was actually included in
                 // coinbase on mainchain.
                 if let Ok(verified) = self
@@ -415,6 +422,7 @@ impl Drivechain {
 
 #[derive(Debug)]
 struct BMMCache {
+    // TODO: Can this be an Option?
     requests: Vec<BMMRequest>,
     prev_main_block_hash: BlockHash,
 }
@@ -439,6 +447,7 @@ pub enum BMMState {
 struct BMMRequest {
     txid: Txid,
     critical_hash: TxMerkleNode,
+    prev_main_block_hash: BlockHash,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -459,3 +468,5 @@ impl std::fmt::Display for BundleStatus {
         }
     }
 }
+
+// TODO Add an optional module for saving deposits paid out in a block. (Needed for ethereum sidechain)
