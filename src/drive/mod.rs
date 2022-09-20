@@ -2,9 +2,10 @@ mod client;
 mod db;
 mod deposit;
 mod withdrawal;
-use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
+use bitcoin::hash_types::{BlockHash, ScriptHash, TxMerkleNode, Txid};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::Amount;
+pub use client::Error as ClientError;
 pub use deposit::Deposit;
 use log::{info, trace};
 use std::collections::HashMap;
@@ -34,6 +35,8 @@ pub enum Error {
     Client(#[from] client::Error),
     #[error("wrong address type")]
     WrongAddressType,
+    #[error("hash error")]
+    HashError(#[from] bitcoin::hashes::Error),
 }
 
 // FIXME: Document public API.
@@ -169,6 +172,16 @@ impl Drivechain {
         let hash = sha256::Hash::hash(deposit_address.as_bytes()).to_string();
         let hash: String = hash[..6].into();
         format!("{}{}", deposit_address, hash)
+    }
+
+    pub fn format_mainchain_address(dest: [u8; 20]) -> Result<String, Error> {
+        let script_hash = ScriptHash::from_slice(&dest)?;
+        let address = bitcoin::Address {
+            payload: bitcoin::util::address::Payload::ScriptHash(script_hash),
+            // FIXME: Don't hardcode this.
+            network: bitcoin::network::constants::Network::Regtest,
+        };
+        Ok(address.to_string())
     }
 
     // Get latest deposits. If height is not None, then don't include deposits
@@ -325,7 +338,7 @@ impl Drivechain {
         &mut self,
         deposits: &[Deposit],
         withdrawals: &HashMap<Vec<u8>, withdrawal::Withdrawal>,
-        refunds: &[Vec<u8>],
+        refunds: &HashMap<Vec<u8>, u64>,
         just_check: bool,
     ) -> Result<(), Error> {
         let height = self.db.get_last_bmm_commitment_main_block_height()?;
@@ -351,9 +364,18 @@ impl Drivechain {
         &self,
         prev_main_block_hash: &BlockHash,
         critical_hash: &TxMerkleNode,
-    ) -> Result<client::VerifiedBMM, Error> {
-        let main_block_hash = self.client.get_next_main_block(prev_main_block_hash)?;
-        let verified = self.client.verify_bmm(&main_block_hash, critical_hash)?;
+    ) -> Result<bool, Error> {
+        let main_block_hash = match self.client.get_next_main_block(prev_main_block_hash) {
+            Ok(mbh) => mbh,
+            Err(_) => return Ok(false),
+        };
+        if !self.is_main_block_connected(&main_block_hash)? {
+            return Ok(false);
+        }
+        let verified = self
+            .client
+            .verify_bmm(&main_block_hash, critical_hash)
+            .is_ok();
         let height = self.client.get_main_block_height(&main_block_hash)?;
         let last_height = self
             .db
@@ -385,6 +407,10 @@ impl Drivechain {
     pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
         self.update_deposits(None)?;
         self.db.get_deposit_outputs().map_err(|err| err.into())
+    }
+
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+        self.db.get_unspent_withdrawals().map_err(|err| err.into())
     }
 
     pub fn extract_mainchain_address_bytes(address: &bitcoin::Address) -> Result<[u8; 20], Error> {

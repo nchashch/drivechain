@@ -97,13 +97,14 @@ impl Client {
         prev_main_block_hash: &BlockHash,
     ) -> Result<BlockHash, Error> {
         let params = vec![json!(prev_main_block_hash.to_string())];
-        self.send_request("getblock", &params)
-            .map(|value| match &value["nextblockhash"] {
+        self.send_request("getblock", &params).map(|value| {
+            match &value["result"]["nextblockhash"] {
                 ureq::serde_json::Value::String(main_block_hash) => {
                     Ok(BlockHash::from_str(main_block_hash).map_err(ParseError::BitcoinHex)?)
                 }
                 _ => Err(Error::NoNextBlock),
-            })?
+            }
+        })?
     }
 
     // check that a block was successfuly bmmed

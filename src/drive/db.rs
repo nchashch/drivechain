@@ -119,7 +119,7 @@ impl DB {
         &mut self,
         deposits: &[Deposit],
         withdrawals: &HashMap<Vec<u8>, Withdrawal>,
-        refunds: &[Vec<u8>],
+        refunds: &HashMap<Vec<u8>, u64>,
         just_check: bool,
     ) -> Result<(), Error> {
         (
@@ -228,13 +228,28 @@ impl DB {
                     }
                     trace!("withdrawals connected");
 
-                    // FIXME: Add separate refunded_outpoints store to allow checking spent
-                    // bundle validity.
+                    // FIXME: Add separate refunded_outpoints store to allow
+                    // checking spent bundle validity.
                     trace!("connecting {} refunds", refunds.len());
-                    for outpoint in refunds.iter() {
+                    for (outpoint, amount) in refunds.iter() {
                         let outpoint = outpoint.as_slice();
-                        if outpoint_to_withdrawal.get(outpoint)?.is_none() {
-                            continue;
+                        match outpoint_to_withdrawal.get(outpoint)? {
+                            Some(withdrawal) => {
+                                let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)
+                                    .map_err(|err| err.into())
+                                    .or_else(abort)?;
+                                if withdrawal.amount != *amount {
+                                    return abort(
+                                        ConnectError::WrongRefundAmount {
+                                            outpoint: hex::encode(outpoint),
+                                            actual_amount: withdrawal.amount,
+                                            refunded_amount: *amount,
+                                        }
+                                        .into(),
+                                    );
+                                }
+                            }
+                            None => continue,
                         }
                         if unspent_outpoints.remove(outpoint)?.is_some() {
                             spent_outpoints.insert(outpoint, &[])?;
@@ -669,6 +684,21 @@ impl DB {
         bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
     }
 
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+        self.unspent_outpoints
+            .iter()
+            .map(|item| {
+                let (outpoint, _) = item?;
+                let withdrawal = match self.outpoint_to_withdrawal.get(&outpoint)? {
+                    Some(withdrawal) => withdrawal,
+                    None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
+                };
+                let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)?;
+                Ok((outpoint.to_vec(), withdrawal))
+            })
+            .collect()
+    }
+
     // FIXME: Add cutoff for maximum number of withdrawal outputs.
     //
     // TODO: Investigate possibility of determining mainchain fee automatically.
@@ -837,6 +867,12 @@ pub enum ConnectError {
         address: String,
         side_balance: bitcoin::Amount,
         main_balance: bitcoin::Amount,
+    },
+    #[error("wrong refund amount: outpoint: {outpoint}, actual amount: {actual_amount}, refunded amount: {refunded_amount}")]
+    WrongRefundAmount {
+        outpoint: String,
+        actual_amount: u64,
+        refunded_amount: u64,
     },
     #[error("there is no deposit with address {0}")]
     NoAddress(String),
