@@ -248,6 +248,17 @@ impl DB {
                                         .into(),
                                     );
                                 }
+                                // NOTE: Can't use is_outpoint_spent here,
+                                // because it would deadlock the sled
+                                // transaction.
+                                if spent_outpoints.get(outpoint).map(|value| value.is_some())? {
+                                    return abort(
+                                        ConnectError::RefundedSpentOutpoint {
+                                            outpoint: hex::encode(outpoint),
+                                        }
+                                        .into(),
+                                    );
+                                }
                             }
                             None => continue,
                         }
@@ -874,6 +885,8 @@ pub enum ConnectError {
         actual_amount: u64,
         refunded_amount: u64,
     },
+    #[error("can't refund already spent outpoint: {outpoint}")]
+    RefundedSpentOutpoint { outpoint: String },
     #[error("there is no deposit with address {0}")]
     NoAddress(String),
     #[error("just checking")]
