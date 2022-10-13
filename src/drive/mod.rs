@@ -44,25 +44,25 @@ impl Drivechain {
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(
         db_path: P,
         this_sidechain: usize,
+        host: &str,
+        port: u16,
         rpcuser: &str,
         rpcpassword: &str,
     ) -> Result<Drivechain, Error> {
         env_logger::init();
         trace!("creating drivechain object");
-        const LOCALHOST: &str = "127.0.0.1";
-        const MAINCHAIN_PORT: usize = 18443;
 
         let client = client::Client {
             this_sidechain,
-            host: LOCALHOST.into(),
-            port: MAINCHAIN_PORT,
+            host: host.to_string(),
+            port,
             rpcuser: rpcuser.to_string(),
             rpcpassword: rpcpassword.to_string(),
         };
 
         let mut bmm_cache = BMMCache::new();
         let mainchain_tip_hash = client.get_mainchain_tip()?;
-        bmm_cache.prev_main_block_hash = mainchain_tip_hash;
+        bmm_cache.prev_main_block_hash = Some(mainchain_tip_hash);
         trace!("drivechain object created successfuly");
         Ok(Drivechain {
             client,
@@ -108,7 +108,7 @@ impl Drivechain {
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
-        self.bmm_cache.prev_main_block_hash = *prev_main_block_hash;
+        self.bmm_cache.prev_main_block_hash = Some(*prev_main_block_hash);
         trace!("bmm request was created successfuly txid = {}", txid);
         Ok(())
     }
@@ -120,7 +120,7 @@ impl Drivechain {
             "attempting to confirm that a block was bmmed at mainchain tip = {}",
             &mainchain_tip_hash
         );
-        if self.bmm_cache.prev_main_block_hash == mainchain_tip_hash {
+        if self.bmm_cache.prev_main_block_hash == Some(mainchain_tip_hash) {
             trace!("no new blocks on mainchain so sidechain block wasn't bmmed");
             // If no blocks were mined on mainchain no bmm requests could have
             // possibly been accepted.
@@ -450,14 +450,14 @@ impl Drivechain {
 struct BMMCache {
     // TODO: Can this be an Option?
     requests: Vec<BMMRequest>,
-    prev_main_block_hash: BlockHash,
+    prev_main_block_hash: Option<BlockHash>,
 }
 
 impl BMMCache {
     fn new() -> BMMCache {
         BMMCache {
             requests: Vec::new(),
-            prev_main_block_hash: BlockHash::default(),
+            prev_main_block_hash: None,
         }
     }
 }

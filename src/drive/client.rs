@@ -15,7 +15,7 @@ use bitcoin::util::psbt::serialize::Serialize;
 pub struct Client {
     pub this_sidechain: usize,
     pub host: String,
-    pub port: usize,
+    pub port: u16,
     pub rpcuser: String,
     pub rpcpassword: String,
 }

@@ -824,7 +824,7 @@ impl DB {
         );
         let bundle = bitcoin::Transaction {
             version: 2,
-            lock_time: 0,
+            lock_time: bitcoin::PackedLockTime(0),
             input: vec![txin],
             output: [vec![return_dest_txout, mainchain_fee_txout], bundle_outputs].concat(),
         };

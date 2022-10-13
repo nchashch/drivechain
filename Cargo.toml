@@ -9,7 +9,7 @@ name = "drivechain"
 path = "src/lib.rs"
 
 [dependencies]
-bitcoin = "0.28.1"
+bitcoin = "0.29.1"
 ureq = { version = "2.4", features = ["json"] }
 base64 = "0.13"
 serde = { version = "1.0.130", features = ["derive"] }
