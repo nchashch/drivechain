@@ -494,5 +494,3 @@ impl std::fmt::Display for BundleStatus {
         }
     }
 }
-
-// TODO Add an optional module for saving deposits paid out in a block. (Needed for ethereum sidechain)

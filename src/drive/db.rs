@@ -9,7 +9,7 @@ use bitcoin::hash_types::{ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
-use log::trace;
+use log::{error, trace};
 use sled::transaction::{abort, TransactionError};
 use sled::Transactional;
 use std::collections::{HashMap, HashSet};
@@ -494,8 +494,8 @@ impl DB {
                         None => None,
                     };
                     let balance = match balance {
-                        Some(balance) => (balance.0, balance.1 + main_amount.as_sat()),
-                        None => (0, main_amount.as_sat()),
+                        Some(balance) => (balance.0, balance.1 + main_amount.to_sat()),
+                        None => (0, main_amount.to_sat()),
                     };
                     let balance = bincode::serialize(&balance).or_else(abort)?;
                     deposit_balances.insert(address.as_bytes(), balance)?;
@@ -710,10 +710,17 @@ impl DB {
             .collect()
     }
 
-    // FIXME: Add cutoff for maximum number of withdrawal outputs.
-    //
     // TODO: Investigate possibility of determining mainchain fee automatically.
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
+        // Weight of a bundle with 0 outputs.
+        const BUNDLE_0_WEIGHT: usize = 332;
+        // Weight of a single output.
+        const OUTPUT_WEIGHT: usize = 128;
+        const MAX_BUNDLE_OUTPUTS: usize =
+            (bitcoin::policy::MAX_STANDARD_TX_WEIGHT as usize - BUNDLE_0_WEIGHT) / OUTPUT_WEIGHT; // turns out to be 3122
+                                                                                                  // Maximum possible weight for a bundle turns out to be 399948 weight
+                                                                                                  // units, just 52 units short of MAX_STANDARD_TX_WEIGHT.
+
         trace!("creating a new bundle from unspent withdrawals in db",);
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
             let (outpoint, _) = item?;
@@ -773,7 +780,15 @@ impl DB {
         outputs.sort_by_key(|a| std::cmp::Reverse(*a));
         let mut fee = 0;
         let mut bundle_outputs = vec![];
-        for output in outputs {
+        for output in &outputs {
+            if bundle_outputs.len() > MAX_BUNDLE_OUTPUTS {
+                trace!("number of bundle outputs {} is greater than maximum number of bundle outputs {} skipping last {} outputs",
+                       outputs.len(),
+                       MAX_BUNDLE_OUTPUTS,
+                       MAX_BUNDLE_OUTPUTS - outputs.len()
+                );
+                break;
+            }
             let script_hash = ScriptHash::from_inner(output.dest);
             let address = bitcoin::Address {
                 payload: bitcoin::util::address::Payload::ScriptHash(script_hash),
@@ -785,10 +800,6 @@ impl DB {
             };
             bundle_outputs.push(bundle_output);
             fee += output.mainchain_fee;
-            const MAX_BUNDLE_OUTPUTS: usize = 10;
-            if bundle_outputs.len() >= MAX_BUNDLE_OUTPUTS {
-                break;
-            }
         }
         let txin = TxIn {
             script_sig: script::Builder::new()
@@ -828,6 +839,14 @@ impl DB {
             input: vec![txin],
             output: [vec![return_dest_txout, mainchain_fee_txout], bundle_outputs].concat(),
         };
+        if bundle.weight() > bitcoin::policy::MAX_STANDARD_TX_WEIGHT as usize {
+            error!(
+                "bundle weight {} is greater than maximum transaction weight {}",
+                bundle.weight(),
+                bitcoin::policy::MAX_STANDARD_TX_WEIGHT
+            );
+            return Err(Error::BundleTooHeavy(bundle.weight()));
+        }
         {
             let hash = bundle.txid();
             let hash = hash.into_inner();
@@ -856,6 +875,8 @@ pub enum Error {
     NoBlockHeight,
     #[error("withdrawal for outpoint {0} is not in db")]
     NoWithdrawalInDb(String),
+    #[error("withdrawal bundle too heavy, weight = {0}")]
+    BundleTooHeavy(usize),
     #[error("from utf8 error")]
     FromUtf8(#[from] std::string::FromUtf8Error),
     #[error("error converting slice to fixed size array")]
