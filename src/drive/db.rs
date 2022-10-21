@@ -716,10 +716,11 @@ impl DB {
         const BUNDLE_0_WEIGHT: usize = 332;
         // Weight of a single output.
         const OUTPUT_WEIGHT: usize = 128;
+        // turns out to be 3122
         const MAX_BUNDLE_OUTPUTS: usize =
-            (bitcoin::policy::MAX_STANDARD_TX_WEIGHT as usize - BUNDLE_0_WEIGHT) / OUTPUT_WEIGHT; // turns out to be 3122
-                                                                                                  // Maximum possible weight for a bundle turns out to be 399948 weight
-                                                                                                  // units, just 52 units short of MAX_STANDARD_TX_WEIGHT.
+            (bitcoin::policy::MAX_STANDARD_TX_WEIGHT as usize - BUNDLE_0_WEIGHT) / OUTPUT_WEIGHT;
+        // Maximum possible weight for a bundle turns out to be 399948 weight
+        // units, just 52 units short of MAX_STANDARD_TX_WEIGHT.
 
         trace!("creating a new bundle from unspent withdrawals in db",);
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
