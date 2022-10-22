@@ -92,8 +92,11 @@ impl MainDeposit {
     }
 }
 
+/// A deposit that must be paid out in a sidechain block.
 #[derive(Debug)]
 pub struct Deposit {
+    /// Sidechain address to which an `amount` of satoshi must be paid out.
     pub address: String,
+    /// Amount of satoshi to be deposited.
     pub amount: u64,
 }

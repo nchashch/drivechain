@@ -695,32 +695,17 @@ impl DB {
         bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
     }
 
-    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
-        self.unspent_outpoints
-            .iter()
-            .map(|item| {
-                let (outpoint, _) = item?;
-                let withdrawal = match self.outpoint_to_withdrawal.get(&outpoint)? {
-                    Some(withdrawal) => withdrawal,
-                    None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
-                };
-                let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)?;
-                Ok((outpoint.to_vec(), withdrawal))
-            })
-            .collect()
-    }
-
     // TODO: Investigate possibility of determining mainchain fee automatically.
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
         // Weight of a bundle with 0 outputs.
         const BUNDLE_0_WEIGHT: usize = 332;
         // Weight of a single output.
         const OUTPUT_WEIGHT: usize = 128;
-        // turns out to be 3122
+        // Turns out to be 3122.
         const MAX_BUNDLE_OUTPUTS: usize =
             (bitcoin::policy::MAX_STANDARD_TX_WEIGHT as usize - BUNDLE_0_WEIGHT) / OUTPUT_WEIGHT;
         // Maximum possible weight for a bundle turns out to be 399948 weight
-        // units, just 52 units short of MAX_STANDARD_TX_WEIGHT.
+        // units, just 52 units short of MAX_STANDARD_TX_WEIGHT = 400000.
 
         trace!("creating a new bundle from unspent withdrawals in db",);
         let withdrawals = self.unspent_outpoints.iter().map(|item| {
