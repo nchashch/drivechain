@@ -471,6 +471,12 @@ impl Drivechain {
         self.db.get_deposit_outputs().map_err(|err| err.into())
     }
 
+    /// Get a map from withdrawal ids to unspent (the ones that are not being
+    /// voted on and are not spent) withdrawals.
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+        self.db.get_unspent_withdrawals().map_err(|err| err.into())
+    }
+
     /// Extract 20 bytes from a mainchain `address`. These bytes are used for
     /// the "mainchain destination" field in sidechain withdrawal requests (20
     /// bytes is more compact than including a whole string). If it is not a

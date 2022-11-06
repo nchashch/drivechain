@@ -711,6 +711,21 @@ impl DB {
         bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
     }
 
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+        self.unspent_outpoints
+            .iter()
+            .map(|item| {
+                let (outpoint, _) = item?;
+                let withdrawal = match self.outpoint_to_withdrawal.get(&outpoint)? {
+                    Some(withdrawal) => withdrawal,
+                    None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
+                };
+                let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)?;
+                Ok((outpoint.to_vec(), withdrawal))
+            })
+            .collect()
+    }
+
     // TODO: Investigate possibility of determining mainchain fee automatically.
     pub fn create_bundle(&mut self) -> Result<Option<bitcoin::Transaction>, Error> {
         // Weight of a bundle with 0 outputs.
