@@ -235,18 +235,34 @@ impl DB {
                         let outpoint = outpoint.as_slice();
                         match outpoint_to_withdrawal.get(outpoint)? {
                             Some(withdrawal) => {
-                                let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)
-                                    .map_err(|err| err.into())
-                                    .or_else(abort)?;
-                                if withdrawal.amount != *amount {
-                                    return abort(
-                                        ConnectError::WrongRefundAmount {
-                                            outpoint: hex::encode(outpoint),
-                                            actual_amount: withdrawal.amount,
-                                            refunded_amount: *amount,
-                                        }
-                                        .into(),
-                                    );
+                                // It is unnecessary and inconvenient to check
+                                // refund amounts here for sidechains using the
+                                // UTXO model.
+                                //
+                                // But for sidechains using accounts model it is
+                                // a lot easier to check refund amounts here, in
+                                // the connect_block method.
+                                //
+                                // So we just gate this behind a feature.
+                                //
+                                // TODO: Figure out how to deal with this
+                                // problem in a better way.
+                                #[cfg(feature = "refund_amount_check")]
+                                {
+                                    let withdrawal =
+                                        bincode::deserialize::<Withdrawal>(&withdrawal)
+                                            .map_err(|err| err.into())
+                                            .or_else(abort)?;
+                                    if withdrawal.amount != *amount {
+                                        return abort(
+                                            ConnectError::WrongRefundAmount {
+                                                outpoint: hex::encode(outpoint),
+                                                actual_amount: withdrawal.amount,
+                                                refunded_amount: *amount,
+                                            }
+                                            .into(),
+                                        );
+                                    }
                                 }
                                 // NOTE: Can't use is_outpoint_spent here,
                                 // because it would deadlock the sled

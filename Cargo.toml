@@ -6,10 +6,12 @@ edition = "2021"
 description = "A library for building BIP300/BIP301 Bitcoin sidechains."
 license = "MIT OR Apache-2.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "drivechain"
 path = "src/lib.rs"
+
+[features]
+refund_amount_check = []
 
 [dependencies]
 bitcoin = "0.29.1"
