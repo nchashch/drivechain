@@ -1,7 +1,9 @@
+// FIXME: This implementaiton of a JSON RPC client is too low level. Restructure
+// this.
 use crate::drive::deposit::MainDeposit;
 use base64::encode;
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
+use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::util::amount::{Amount, Denomination};
 use bitcoin::util::psbt::serialize::Deserialize;
 use log::{info, trace};
@@ -111,17 +113,17 @@ impl Client {
     pub fn verify_bmm(
         &self,
         main_block_hash: &BlockHash,
-        critical_hash: &TxMerkleNode,
+        side_block_hash: &BlockHash,
     ) -> Result<VerifiedBMM, Error> {
         let params = vec![
             json!(main_block_hash.to_string()),
-            json!(critical_hash.to_string()),
+            json!(side_block_hash.to_string()),
             json!(self.this_sidechain),
         ];
         trace!(
-            "verifying bmm main hash = {}, critical hash = {}",
+            "verifying bmm main block hash = {}, side block hash = {}",
             main_block_hash,
-            critical_hash
+            side_block_hash
         );
         self.send_request("verifybmm", &params)
             .map(|value| {
@@ -157,14 +159,14 @@ impl Client {
 
     pub fn send_bmm_request(
         &self,
-        critical_hash: &TxMerkleNode,
+        side_block_hash: &BlockHash,
         prev_main_block_hash: &BlockHash,
         height: usize,
         amount: Amount,
     ) -> Result<Txid, Error> {
         trace!(
             "sending bmm request critical hash = {}, prev main hash = {}, height = {}, amount = {}",
-            critical_hash,
+            side_block_hash,
             prev_main_block_hash,
             height,
             amount
@@ -173,7 +175,7 @@ impl Client {
         let params = vec![
             json!(amount.to_string_in(Denomination::Bitcoin)),
             json!(height),
-            json!(critical_hash.to_string()),
+            json!(side_block_hash.to_string()),
             json!(self.this_sidechain),
             json!(str_hash_prev[str_hash_prev.len() - 8..]),
         ];

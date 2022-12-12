@@ -2,7 +2,7 @@ mod client;
 mod db;
 mod deposit;
 mod withdrawal;
-use bitcoin::hash_types::{BlockHash, ScriptHash, TxMerkleNode, Txid};
+use bitcoin::hash_types::{BlockHash, ScriptHash, Txid};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::Amount;
 pub use deposit::Deposit;
@@ -79,46 +79,33 @@ impl Drivechain {
         })
     }
 
-    /// Get the mainchain tip -- hash of the last mainchain block that became part of consensus.
+    /// This is used to get `prev_main_block_hash` the for a sidechain block
+    /// header. Mainchain tip will become the previous block when the sidechain
+    /// block is BMMed.
     pub fn get_mainchain_tip(&self) -> Result<BlockHash, Error> {
         self.client.get_mainchain_tip().map_err(|err| err.into())
     }
 
-    /// Given `main_block_hash` return hash of the parent block of
-    /// `main_block_hash`.
-    pub fn get_prev_main_block_hash(
-        &self,
-        main_block_hash: &BlockHash,
-    ) -> Result<BlockHash, Error> {
-        self.client
-            .get_prev_block_hash(main_block_hash)
-            .map_err(|err| err.into())
-    }
-
-    /// Send a bmm request to mainchain.
-    ///
-    /// * `critical_hash` - sidechain block hash (or other hash that must be commited) to be included in the BMM request.
-    /// * `prev_main_block_hash` - previous mainchain block hash that was included in the sidechain block header.
-    /// * `amount` - amount of BTC to be paid to mainchain miners in case this BMM request is successful.
+    /// This is called by sidechain "miners" to get a sidechain block BMMed.
     pub fn attempt_bmm(
         &mut self,
-        critical_hash: &TxMerkleNode,
+        side_block_hash: &BlockHash,
         prev_main_block_hash: &BlockHash,
         amount: Amount,
     ) -> Result<(), Error> {
         trace!(
             "attempting to create a bmm request for block with hash = {} and with bribe = {}",
-            critical_hash,
+            side_block_hash,
             amount
         );
         // Create a BMM request.
         let txid = self
             .client
-            .send_bmm_request(critical_hash, prev_main_block_hash, 0, amount)?;
+            .send_bmm_request(side_block_hash, prev_main_block_hash, 0, amount)?;
         let bmm_request = BMMRequest {
             txid,
             prev_main_block_hash: *prev_main_block_hash,
-            critical_hash: *critical_hash,
+            side_block_hash: *side_block_hash,
         };
         // and add request data to the requests vec.
         self.bmm_cache.requests.push(bmm_request);
@@ -127,7 +114,7 @@ impl Drivechain {
         Ok(())
     }
 
-    /// Check if a bmm request has `Succeded`, `Failed`, or is still `Pending`.
+    /// Check the status of last BMM request (the one created by `attempt_bmm`).
     pub fn confirm_bmm(&mut self) -> Result<BMMState, Error> {
         let mainchain_tip_hash = self.client.get_mainchain_tip()?;
         trace!(
@@ -146,7 +133,7 @@ impl Drivechain {
         for request in self.bmm_cache.requests.drain(..) {
             trace!(
                 "checking bmm request for side:block hash = {}",
-                request.critical_hash
+                request.side_block_hash
             );
             // We check if our request was included in a mainchain block.
             if let Some(main_block_hash) = self.client.get_tx_block_hash(&request.txid)? {
@@ -157,16 +144,16 @@ impl Drivechain {
                     trace!("bmm commitment is invalid because the mainchain block doesn't follow previous mainchcain block");
                     continue;
                 }
-                // And we check that critical_hash was actually included in
+                // And we check that side_block_hash was actually included in
                 // coinbase on mainchain.
                 if let Ok(verified) = self
                     .client
-                    .verify_bmm(&main_block_hash, &request.critical_hash)
+                    .verify_bmm(&main_block_hash, &request.side_block_hash)
                 {
                     trace!("bmm request was successful");
                     info!(
                         "sidechain block {} was successfuly bmmed in mainchain block {} at {}",
-                        &request.critical_hash,
+                        &request.side_block_hash,
                         &main_block_hash,
                         chrono::DateTime::<chrono::Utc>::from(
                             std::time::UNIX_EPOCH
@@ -182,7 +169,7 @@ impl Drivechain {
     }
 
     /// Format `str_dest` with the proper `s{sidechain_number}_` prefix and a
-    /// checksum postfix required for making a deposit request on mainchain.
+    /// checksum postfix for calling createsidechaindeposit on mainchain.
     pub fn format_deposit_address(&self, str_dest: &str) -> String {
         let deposit_address: String = format!("s{}_{}_", self.client.this_sidechain, str_dest);
         let hash = sha256::Hash::hash(deposit_address.as_bytes()).to_string();
@@ -190,8 +177,7 @@ impl Drivechain {
         format!("{}{}", deposit_address, hash)
     }
 
-    /// Format a 20 byte `dest` hash into a proper mainchain P2SH address string
-    /// required for displaying withdrawal requests on the sidechain.
+    /// Format a 20 byte hash into a human readable mainchain address.
     pub fn format_mainchain_address(dest: [u8; 20]) -> Result<String, Error> {
         let script_hash = ScriptHash::from_slice(&dest)?;
         let address = bitcoin::Address {
@@ -202,8 +188,6 @@ impl Drivechain {
         Ok(address.to_string())
     }
 
-    /// Get latest deposits. If mainchain `height` is not `None`, then don't
-    /// include deposits included in mainchain blocks newer than `height`.
     fn update_deposits(&self, height: Option<usize>) -> Result<(), Error> {
         let mut last_deposit = self
             .db
@@ -254,8 +238,6 @@ impl Drivechain {
         Ok(())
     }
 
-    /// Update the local withdrawal bundle status database by querying mainchain
-    /// RPC.
     fn update_bundles(&mut self) -> Result<(), Error> {
         trace!("updating bundle statuses");
         let known_failed = self.db.get_failed_bundle_hashes()?;
@@ -282,8 +264,8 @@ impl Drivechain {
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
-    /// If there is a bundle waiting to be broadcast, attempt to broadcast it to
-    /// mainchain.
+    // FIXME: Make this method private and call it in `connect_block`.
+    /// This must be called after every block connection.
     pub fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
         trace!("attempting to create and broadcast a new bundle");
         self.update_bundles()?;
@@ -291,10 +273,6 @@ impl Drivechain {
         // opportunity to refund. If we would create a new bundle immediately,
         // some outputs would be included in it immediately again, and so they
         // would never become refundable.
-        //
-        // We don't have to wait after a spent bundle, because, if mainchain
-        // doesn't reorg, all withdrawal outputs in it will remain spent forever
-        // anyway.
         //
         // FIXME: Make this value different for regtest/testnet/mainnet.
         const BUNDLE_WAIT_PERIOD: usize = 5;
@@ -341,8 +319,6 @@ impl Drivechain {
         Ok(())
     }
 
-    /// Check what is the status of a particular bundle. Is it `Voting` (being
-    /// voted on by miners), `Failed`, `Spent`, or `New` (not broadcast yet)?
     fn get_bundle_status(&self, txid: &Txid) -> Result<BundleStatus, Error> {
         let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
         let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
@@ -358,21 +334,13 @@ impl Drivechain {
         })
     }
 
-    /// This method should be called when a sidechain block becomes part of
-    /// consensus (in Bitcoin codebase it is called "connecting" a block).
-    ///
-    /// * `deposits` - all deposits that were in fact paid out in this sidechain
-    /// block.
-    /// * `withdrawals` - all withdrawal requests that in fact "locked"
-    /// sidechain coins in this block, it is a map from withdrawal id (an
-    /// array of bytes) to a withdrawal request object.
-    /// * `refunds` - all refund requests that were included in this block, it
-    /// is a map from withdrawal id to withdrawal amount.
+    /// This must be called when a sidechain block becomes part of consensus
+    /// (most likely when it was successfuly BMMed).
     pub fn connect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &HashMap<Vec<u8>, withdrawal::Withdrawal>,
-        refunds: &HashMap<Vec<u8>, u64>,
+        withdrawals: &HashMap<db::Outpoint, withdrawal::Withdrawal>,
+        refunds: &HashMap<db::Outpoint, u64>,
         just_check: bool,
     ) -> Result<(), Error> {
         let height = self.db.get_last_bmm_commitment_main_block_height()?;
@@ -382,21 +350,13 @@ impl Drivechain {
         Ok(())
     }
 
-    /// This method should be called when a sidechain block is no longer part of
-    /// consensus (in Bitcoin codebase it is called "disconnecting" a block).
-    /// That usually happens when there is a reorg.
-    ///
-    /// * `deposits` - all deposits that were in fact paid out in this sidechain
-    /// block.
-    /// * `withdrawals` - withdrawal ids of all withdrawal requests included in
-    /// this block.
-    /// * `refunds` - withdrawal ids of all withdrawal requests refunds for
-    /// which were requested in this block.
+    /// This must be called on a block when a sidechain it is no longer part of
+    /// consensus (most likely because of a mainchain reorg).
     pub fn disconnect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &[Vec<u8>],
-        refunds: &[Vec<u8>],
+        withdrawals: &[db::Outpoint],
+        refunds: &[db::Outpoint],
         just_check: bool,
     ) -> Result<(), Error> {
         self.db
@@ -404,18 +364,11 @@ impl Drivechain {
         Ok(())
     }
 
-    /// Verify that a sidechain block has a valid BMM commitment included on
-    /// mainchain. This is analogous to checking that a block hash meets the
-    /// Proof of Work difficulty in a PoW chain.
-    ///
-    /// * `prev_main_block_hash` - hash of the parent block of a block in which
-    /// the actual BMM commitment was included (this hash must be included in
-    /// the sidechain block header).
-    /// * `critical_hash` - hash of the sidechain block header.
+    /// `prev_main_block_hash` must be included in a sidechain block header.
     pub fn verify_bmm(
         &self,
         prev_main_block_hash: &BlockHash,
-        critical_hash: &TxMerkleNode,
+        side_block_hash: &BlockHash,
     ) -> Result<bool, Error> {
         let main_block_hash = match self.client.get_next_main_block(prev_main_block_hash) {
             Ok(mbh) => mbh,
@@ -426,7 +379,7 @@ impl Drivechain {
         }
         let verified = self
             .client
-            .verify_bmm(&main_block_hash, critical_hash)
+            .verify_bmm(&main_block_hash, side_block_hash)
             .is_ok();
         let height = self.client.get_main_block_height(&main_block_hash)?;
         let last_height = self
@@ -439,48 +392,40 @@ impl Drivechain {
         Ok(verified)
     }
 
-    /// Check if block that hashes to `main_block_hash` is still part of
-    /// consensus.
+    /// This is used for dealing with mainchain reorgs.
     pub fn is_main_block_connected(&self, main_block_hash: &BlockHash) -> Result<bool, Error> {
         self.client
             .is_main_block_connected(main_block_hash)
             .map_err(|err| err.into())
     }
 
-    // FIXME: Rename `outpoint` to `withdrawal`. Rewrite this doc.
-    /// Check if an outpoint (withdrawal id) is spent. An outpoint is considered
-    /// spent if it is included in a withdrawal bundle that is either being
-    /// voted on or is spent. An outpoint is considered unspent if it is
-    /// included in a withdrawal bundle that is either new or failed.
+    // FIXME: Rename `outpoint` to `withdrawal`.
+    /// Check if a withdrawal output can be spent (refunded) or not.
     pub fn is_outpoint_spent(&self, outpoint: &[u8]) -> Result<bool, Error> {
         self.db
             .is_outpoint_spent(outpoint)
             .map_err(|err| err.into())
     }
 
-    /// Flush the drivechain sled database to disk.
+    /// Flush the drivechain database to disk.
     pub fn flush(&mut self) -> Result<usize, Error> {
         trace!("flushing the db");
         self.db.flush().map_err(|err| err.into())
     }
 
-    /// Get sidechain addresses and amounts for deposits that must be paid out
-    /// in the next block.
+    /// Get deposits that must be paid out in the next block.
     pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
         self.update_deposits(None)?;
         self.db.get_deposit_outputs().map_err(|err| err.into())
     }
 
-    /// Get a map from withdrawal ids to unspent (the ones that are not being
-    /// voted on and are not spent) withdrawals.
-    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+    /// Get withdrawals that are not spent and not being voted on.
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<db::Outpoint, Withdrawal>, Error> {
         self.db.get_unspent_withdrawals().map_err(|err| err.into())
     }
 
-    /// Extract 20 bytes from a mainchain `address`. These bytes are used for
-    /// the "mainchain destination" field in sidechain withdrawal requests (20
-    /// bytes is more compact than including a whole string). If it is not a
-    /// P2SH address this function will return an error.
+    /// The extracted 20 bytes are used in withdrawal outputs or withdrawal
+    /// transactions in a sidechain.
     pub fn extract_mainchain_address_bytes(address: &bitcoin::Address) -> Result<[u8; 20], Error> {
         match address.payload {
             bitcoin::util::address::Payload::ScriptHash(bytes) => Ok(bytes.into_inner()),
@@ -490,11 +435,7 @@ impl Drivechain {
 
     // FIXME: Add a way to check network, so you cannot send mainnet funds to
     // testnet/regtest address.
-    /// Get a new mainchain address via mainchain RPC. This method is used for
-    /// implementing a single "withdraw" RPC on a sidechain, to improve UX
-    /// (without this single "withdraw" method you will have to get a mainchain
-    /// address from mainchain and then create a withdrawal request on sidechain
-    /// with two separate RPC calls).
+    /// This is useful for implementing the "withdraw" RPC on a sidechain.
     pub fn get_new_mainchain_address(&self) -> Result<bitcoin::Address, Error> {
         self.client
             .get_new_mainchain_address()
@@ -502,11 +443,7 @@ impl Drivechain {
     }
 
     // FIXME: Pass through actually usable error messages in case of RPC error.
-    /// Format `address` into a proper deposit address and create a deposit on
-    /// mainchain via mainchain RPC. This method is used for implementing a
-    /// single "deposit" RPC on a sidechain (otherwise you will need two
-    /// separate RPC calls, one on sidechain to generate and format an address,
-    /// and one on mainchain to create a deposit).
+    /// Call mainchain RPC to create a deposit.
     pub fn create_deposit(
         &self,
         address: &str,
@@ -519,10 +456,7 @@ impl Drivechain {
             .map_err(|err| err.into())
     }
 
-    /// Call a mainchain `generate` RPC. Useful for implementing a sidechain
-    /// `generate` RPC for regtest mode that calls `attempt_bmm` and then
-    /// `generate` immediately, without the need to make two separate RPC calls
-    /// on sidechain and mainchain.
+    /// Mine a mainchain block (only works in regtest mode).
     pub fn generate(&self, n: usize) -> Result<Vec<BlockHash>, Error> {
         self.client.generate(n).map_err(|err| err.into())
     }
@@ -558,7 +492,7 @@ pub enum BMMState {
 #[derive(Debug)]
 struct BMMRequest {
     txid: Txid,
-    critical_hash: TxMerkleNode,
+    side_block_hash: BlockHash,
     prev_main_block_hash: BlockHash,
 }
 
