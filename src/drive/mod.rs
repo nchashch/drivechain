@@ -93,15 +93,16 @@ impl Drivechain {
         prev_main_block_hash: &BlockHash,
         amount: Amount,
     ) -> Result<(), Error> {
+        self.attempt_bundle_broadcast()?;
         trace!(
             "attempting to create a bmm request for block with hash = {} and with bribe = {}",
             side_block_hash,
             amount
         );
         // Create a BMM request.
-        let txid = self
-            .client
-            .send_bmm_request(side_block_hash, prev_main_block_hash, 0, amount)?;
+        let txid =
+            self.client
+                .send_bmm_request(side_block_hash, prev_main_block_hash, 0, amount)?;
         let bmm_request = BMMRequest {
             txid,
             prev_main_block_hash: *prev_main_block_hash,
@@ -264,9 +265,7 @@ impl Drivechain {
     }
 
     // TODO: Raise alarm if bundle hash being voted on is wrong.
-    // FIXME: Make this method private and call it in `connect_block`.
-    /// This must be called after every block connection.
-    pub fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
+    fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
         trace!("attempting to create and broadcast a new bundle");
         self.update_bundles()?;
         // Wait for some time after a failed bundle to give people an
@@ -305,7 +304,7 @@ impl Drivechain {
             }
         };
         let status = self.get_bundle_status(&bundle.txid())?;
-        info!("bundle {} created it is {}", bundle.txid(), status,);
+        info!("bundle {} created, it is {}", bundle.txid(), status,);
         trace!("bundle = {:?}", bundle);
         // We broadcast a bundle only if it was not seen before, meaning it is
         // neither failed nor spent.
