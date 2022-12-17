@@ -27,3 +27,10 @@ thiserror = "1.0.31"
 log = "0.4"
 chrono = "0.4"
 env_logger = "0.9"
+rusqlite = { version = "0.28.0", features = ["bundled"] }
+
+[dev-dependencies]
+rand = "0.8.5"
+fake = { version = "2.5.0", features = ["derive"] }
+quickcheck = "1.0.3"
+quickcheck_macros = "1.0.0"
