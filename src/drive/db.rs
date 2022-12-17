@@ -1,32 +1,28 @@
-use super::deposit::{Deposit, MainDeposit};
+// FIXME: Write down how this all works in plain english.
+// FIXME: This file is ill structured and too long. Restructure it and document
+// it thoroughly.
+// FIXME: Add unit tests for every function.
+// FIXME: Use SQLite instead of sled.
+use super::deposit::{Deposit, DepositUpdate, MainDeposit};
 use super::withdrawal::Withdrawal;
-use bitcoin::blockdata::transaction::OutPoint;
 use bitcoin::blockdata::{
     opcodes, script,
-    transaction::{TxIn, TxOut},
+    transaction::{OutPoint, TxIn, TxOut},
 };
-use bitcoin::hash_types::{ScriptHash, Txid};
+use bitcoin::hash_types::{BlockHash, ScriptHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
 use byteorder::{BigEndian, ByteOrder};
 use log::{error, trace};
+use rusqlite::{Connection, OptionalExtension, Result};
 use sled::transaction::{abort, TransactionError};
 use sled::Transactional;
 use std::collections::{HashMap, HashSet};
 
-const DEPOSITS: &[u8] = b"deposits";
-const DEPOSIT_BALANCES: &[u8] = b"deposit_balances";
-const UNBALANCED_DEPOSITS: &[u8] = b"unbalanced_deposits";
-
-const OUTPOINT_TO_WITHDRAWAL: &[u8] = b"outpoint_to_withdrawal";
-const SPENT_OUTPOINTS: &[u8] = b"spent_outpoints";
-const UNSPENT_OUTPOINTS: &[u8] = b"unspent_outpoints";
-
-const BUNDLE_HASH_TO_INPUTS: &[u8] = b"bundle_hash_to_inputs";
-const FAILED_BUNDLE_HASHES: &[u8] = b"failed_bundle_hashes";
-const SPENT_BUNDLE_HASHES: &[u8] = b"spent_bundle_hashes";
-
-const VALUES: &[u8] = b"values";
+#[cfg(test)]
+use fake::{Dummy, Fake, Faker};
+#[cfg(test)]
+use quickcheck_macros::quickcheck;
 
 // Current sidechain block height.
 const SIDE_BLOCK_HEIGHT: &[u8] = b"side_block_height";
@@ -35,43 +31,101 @@ const LAST_FAILED_BUNDLE_HEIGHT: &[u8] = b"last_failed_bundle_height";
 // Mainchain block height of the last known bmm commitment.
 const LAST_BMM_COMMITMENT_MAIN_BLOCK_HEIGHT: &[u8] = b"last_bmm_commitment_main_block_height";
 
+#[derive(Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Outpoint(Vec<u8>);
+
+impl Outpoint {
+    fn bytes(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+    fn hex(&self) -> String {
+        hex::encode(self.bytes())
+    }
+}
+#[derive(Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Address(String);
+
+// TODO: Implement proper transactions support in typed_sled or write another
+// typed wrapper over sled.
 pub struct DB {
+    conn: Connection,
     db: sled::Db,
+    // Index -> Deposit
     deposits: sled::Tree,
+    // Address -> (u64, u64)
     deposit_balances: sled::Tree,
+    // Address -> ()
     unbalanced_deposits: sled::Tree,
+    // Outpoint -> Withdrawal
     outpoint_to_withdrawal: sled::Tree,
+    // Outpoint -> ()
     spent_outpoints: sled::Tree,
+    // Outpoint -> ()
     unspent_outpoints: sled::Tree,
+    // Txid -> Vec<Outpoint>
     bundle_hash_to_inputs: sled::Tree,
 
     // Failed and spent bundle hashes that we have already seen.
+    // Txid -> ()
     failed_bundle_hashes: sled::Tree,
+    // Txid -> ()
     spent_bundle_hashes: sled::Tree,
 
     // Store for values like:
     // block_height
     // last_failed_bundle_height
     // last_valid_bmm_main_block_height
+    // String -> u64
     values: sled::Tree,
 }
 
 impl DB {
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Display>(path: P) -> Result<DB, Error> {
-        trace!("creating drivechain object with path = {}", path);
+        trace!("creating drivechain database with path = {}", path);
+        let conn = Connection::open_in_memory()?;
+        conn.execute(
+            "CREATE TABLE deposit (
+            id INTEGER PRIMARY KEY,
+            blockhash BLOB NOT NULL,
+            txid BLOB NOT NULL,
+            vout INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            strdest TEXT NOT NULL
+        )",
+            (), // empty list of parameters.
+        )?;
+        conn.execute(
+            "CREATE TABLE deposit_balance (
+            address TEXT PRIMARY KEY,
+            delta INTEGER NOT NULL
+        )",
+            (), // empty list of parameters.
+        )?;
+        conn.execute(
+            "CREATE TABLE withdrawal (
+            outpoint BLOB PRIMARY KEY,
+            fee INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            dest BLOB NOT NULL,
+            amount INTEGER NOT NULL,
+            bundle BLOB
+        )",
+            (), // empty list of parameters.
+        )?;
         let db = sled::open(path)?;
-        let deposits = db.open_tree(DEPOSITS)?;
-        let deposit_balances = db.open_tree(DEPOSIT_BALANCES)?;
-        let unbalanced_deposits = db.open_tree(UNBALANCED_DEPOSITS)?;
-        let outpoint_to_withdrawal = db.open_tree(OUTPOINT_TO_WITHDRAWAL)?;
-        let spent_outpoints = db.open_tree(SPENT_OUTPOINTS)?;
-        let unspent_outpoints = db.open_tree(UNSPENT_OUTPOINTS)?;
-        let bundle_hash_to_inputs = db.open_tree(BUNDLE_HASH_TO_INPUTS)?;
-        let failed_bundle_hashes = db.open_tree(FAILED_BUNDLE_HASHES)?;
-        let spent_bundle_hashes = db.open_tree(SPENT_BUNDLE_HASHES)?;
-        let values = db.open_tree(VALUES)?;
-        trace!("drivechain object successfuly created");
+        let deposits = db.open_tree("deposits")?;
+        let deposit_balances = db.open_tree("deposit_balances")?;
+        let unbalanced_deposits = db.open_tree("unbalanced_deposits")?;
+        let outpoint_to_withdrawal = db.open_tree("outpoint_to_withdrawal")?;
+        let spent_outpoints = db.open_tree("spent_outpoints")?;
+        let unspent_outpoints = db.open_tree("unspent_outpoints")?;
+        let bundle_hash_to_inputs = db.open_tree("bundle_hash_to_inputs")?;
+        let failed_bundle_hashes = db.open_tree("failed_bundle_hashes")?;
+        let spent_bundle_hashes = db.open_tree("spent_bundle_hashes")?;
+        let values = db.open_tree("values")?;
+        trace!("drivechain database successfuly created");
         Ok(DB {
+            conn,
             db,
             deposits,
             deposit_balances,
@@ -86,8 +140,19 @@ impl DB {
         })
     }
 
-    pub fn flush(&mut self) -> Result<usize, Error> {
-        self.db.flush().map_err(|err| err.into())
+    pub fn _get_deposit_outputs(&self) -> Result<HashMap<String, u64>, Error> {
+        let mut deposits = self
+            .conn
+            .prepare("SELECT address, delta FROM deposit_balance WHERE delta > 0")?;
+        let deposits = deposits
+            .query_map([], |row| {
+                let address: String = row.get(0)?;
+                let amount: u64 = row.get(1)?;
+                Ok((address, amount))
+            })?
+            .map(|deposit| deposit.unwrap())
+            .collect();
+        Ok(deposits)
     }
 
     pub fn get_deposit_outputs(&self) -> Result<Vec<Deposit>, Error> {
@@ -118,8 +183,9 @@ impl DB {
     pub fn connect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &HashMap<Vec<u8>, Withdrawal>,
-        refunds: &HashMap<Vec<u8>, u64>,
+        withdrawals: &HashMap<Outpoint, Withdrawal>,
+        refunds: &HashMap<Outpoint, u64>,
+        // FIXME: Get rid of this flag.
         just_check: bool,
     ) -> Result<(), Error> {
         (
@@ -215,7 +281,7 @@ impl DB {
                     let height = height + 1;
                     values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
                     for (outpoint, withdrawal) in withdrawals.iter() {
-                        let outpoint = outpoint.as_slice();
+                        let outpoint = outpoint.bytes();
                         let withdrawal = Withdrawal {
                             height,
                             ..*withdrawal
@@ -232,7 +298,7 @@ impl DB {
                     // checking spent bundle validity.
                     trace!("connecting {} refunds", refunds.len());
                     for (outpoint, amount) in refunds.iter() {
-                        let outpoint = outpoint.as_slice();
+                        let outpoint = outpoint.bytes();
                         match outpoint_to_withdrawal.get(outpoint)? {
                             Some(withdrawal) => {
                                 // It is unnecessary and inconvenient to check
@@ -303,8 +369,9 @@ impl DB {
     pub fn disconnect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &[Vec<u8>],
-        refunds: &[Vec<u8>],
+        withdrawals: &[Outpoint],
+        refunds: &[Outpoint],
+        // FIXME: Get rid of this flag.
         just_check: bool,
     ) -> Result<(), Error> {
         trace!(
@@ -386,7 +453,7 @@ impl DB {
                     let height = height - 1;
                     values.insert(SIDE_BLOCK_HEIGHT, &height.to_be_bytes())?;
                     for outpoint in withdrawals.iter() {
-                        let outpoint = outpoint.as_slice();
+                        let outpoint = outpoint.bytes();
                         outpoint_to_withdrawal.remove(outpoint)?;
                         unspent_outpoints.remove(outpoint)?;
                         spent_outpoints.remove(outpoint)?;
@@ -395,7 +462,7 @@ impl DB {
 
                     trace!("disconnecting {} refunds", refunds.len());
                     for outpoint in refunds.iter() {
-                        let outpoint = outpoint.as_slice();
+                        let outpoint = outpoint.bytes();
                         if outpoint_to_withdrawal.get(outpoint)?.is_none() {
                             continue;
                         }
@@ -432,6 +499,93 @@ impl DB {
             .values
             .get(LAST_BMM_COMMITMENT_MAIN_BLOCK_HEIGHT)?
             .map(|height| BigEndian::read_u64(&height) as usize))
+    }
+
+    pub fn _update_deposits(&mut self, deposits: &[DepositUpdate]) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        trace!("updating deposits db with {} new deposits", deposits.len());
+        // Get the last deposit stored in the db.
+        let last_deposit = DB::_get_last_deposit(&tx)?;
+        // Find the deposit that spends it.
+        let deposits: Vec<&DepositUpdate> = deposits
+            .iter()
+            .skip_while(|deposit| match &last_deposit {
+                Some(other) => !deposit.spends(other),
+                // If there are no deposits in db we don't skip any
+                // deposits.
+                None => false,
+            })
+            .collect();
+
+        // Apply all new deposits to deposit_balance table.
+        let mut balances = HashMap::<String, Amount>::new();
+        let mut prev_amount = last_deposit
+            .map(|deposit| deposit.amount)
+            .unwrap_or(Amount::ZERO);
+        for deposit in deposits {
+            if deposit.amount < prev_amount {
+                continue;
+            }
+            trace!(
+                "added {} to {}",
+                deposit.amount - prev_amount,
+                deposit.strdest
+            );
+            let balance = balances
+                .entry(deposit.strdest.clone())
+                .or_insert(Amount::ZERO);
+            *balance += deposit.amount - prev_amount;
+            prev_amount = deposit.amount;
+        }
+        for (address, delta) in balances {
+            tx.execute(
+                "INSERT INTO deposit_balance (address, delta)
+                VALUES (?1, ?2)
+                ON CONFLICT (address) DO
+                UPDATE SET delta=delta+?2",
+                (address, delta.to_sat()),
+            )?;
+        }
+        tx.commit()?;
+        // Set new last_deposit.
+        Ok(())
+    }
+
+    fn _push_deposit(tx: &rusqlite::Transaction, deposit: &DepositUpdate) -> Result<(), Error> {
+        tx.execute("DELETE FROM last_ctip", ())?;
+        tx.execute(
+            "INSERT INTO deposit (blockhash, txid, vout, amount, strdest) VALUES (?, ?, ?, ?, ?)",
+            (
+                deposit.blockhash.into_inner(),
+                deposit.ctip.txid.into_inner(),
+                deposit.ctip.vout,
+                deposit.amount.to_sat(),
+                deposit.strdest.clone(),
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn _get_last_deposit(tx: &rusqlite::Transaction) -> Result<Option<DepositUpdate>, Error> {
+        let mut deposit = tx.prepare(
+            "SELECT id, blockhash, txid, vout, amount, strdest FROM deposit ORDER BY id",
+        )?;
+        let deposit = deposit
+            .query_row([], |row| {
+                let deposit = DepositUpdate {
+                    index: row.get(0)?,
+                    blockhash: BlockHash::from_inner(row.get(1)?),
+                    ctip: OutPoint {
+                        txid: Txid::from_inner(row.get(2)?),
+                        vout: row.get(3)?,
+                    },
+                    amount: Amount::from_sat(row.get(4)?),
+                    strdest: row.get(5)?,
+                };
+                Ok(deposit)
+            })
+            .optional()?;
+        Ok(deposit)
     }
 
     pub fn update_deposits(&self, deposits: &[MainDeposit]) -> Result<(), Error> {
@@ -601,12 +755,14 @@ impl DB {
             .transaction(
                 |(outpoint_to_withdrawal, unspent_outpoints, spent_outpoints)| {
                     for input in inputs.iter() {
-                        let withdrawal = outpoint_to_withdrawal.get(input)?;
+                        // FIXME: Is this unwrap ok?
+                        let withdrawal =
+                            outpoint_to_withdrawal.get(bincode::serialize(input).unwrap())?;
                         if withdrawal.is_none() {
-                            return abort(Error::NoWithdrawalInDb(hex::encode(&input)));
+                            return abort(Error::NoWithdrawalInDb(input.hex()));
                         }
-                        unspent_outpoints.remove(input.as_slice())?;
-                        spent_outpoints.insert(input.as_slice(), &[])?;
+                        unspent_outpoints.remove(input.bytes())?;
+                        spent_outpoints.insert(input.bytes(), &[])?;
                     }
                     Ok(())
                 },
@@ -626,8 +782,8 @@ impl DB {
                 |(spent_bundle_hashes, unspent_outpoints, spent_outpoints)| {
                     spent_bundle_hashes.insert(txid.as_inner(), &[])?;
                     for input in inputs.iter() {
-                        unspent_outpoints.remove(input.as_slice())?;
-                        spent_outpoints.insert(input.as_slice(), &[])?;
+                        unspent_outpoints.remove(input.bytes())?;
+                        spent_outpoints.insert(input.bytes(), &[])?;
                     }
                     Ok(())
                 },
@@ -648,8 +804,8 @@ impl DB {
                 |(failed_bundle_hashes, unspent_outpoints, spent_outpoints, values)| {
                     failed_bundle_hashes.insert(txid.as_inner(), &[])?;
                     for input in inputs.iter() {
-                        spent_outpoints.remove(input.as_slice())?;
-                        unspent_outpoints.insert(input.as_slice(), &[])?;
+                        spent_outpoints.remove(input.bytes())?;
+                        unspent_outpoints.insert(input.bytes(), &[])?;
                     }
                     let last_failed_bundle_height = match values.get(SIDE_BLOCK_HEIGHT)? {
                         Some(height) => height,
@@ -702,16 +858,16 @@ impl DB {
             .collect()
     }
 
-    pub fn get_inputs(&mut self, txid: &Txid) -> Result<Vec<Vec<u8>>, Error> {
+    pub fn get_inputs(&mut self, txid: &Txid) -> Result<Vec<Outpoint>, Error> {
         let hash = txid.into_inner();
         let inputs = match self.bundle_hash_to_inputs.get(hash)? {
             Some(inputs) => inputs,
             None => return Ok(vec![]),
         };
-        bincode::deserialize::<Vec<Vec<u8>>>(&inputs).map_err(|err| err.into())
+        bincode::deserialize::<Vec<Outpoint>>(&inputs).map_err(|err| err.into())
     }
 
-    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Outpoint, Withdrawal>, Error> {
         self.unspent_outpoints
             .iter()
             .map(|item| {
@@ -721,7 +877,7 @@ impl DB {
                     None => return Err(Error::NoWithdrawalInDb(hex::encode(&outpoint))),
                 };
                 let withdrawal = bincode::deserialize::<Withdrawal>(&withdrawal)?;
-                Ok((outpoint.to_vec(), withdrawal))
+                Ok((Outpoint(outpoint.to_vec()), withdrawal))
             })
             .collect()
     }
@@ -874,10 +1030,18 @@ impl DB {
         trace!("bundle was created successfuly");
         Ok(Some(bundle))
     }
+
+    pub fn flush(&mut self) -> Result<usize, Error> {
+        self.db.flush().map_err(|err| err.into())
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("there are more than one ctip in last_ctip table")]
+    MultipleCtips,
+    #[error("rusqlite error")]
+    Rusqlite(#[from] rusqlite::Error),
     #[error("sled error")]
     Sled(#[from] sled::Error),
     #[error("bincode error")]
@@ -939,4 +1103,191 @@ pub enum DisconnectError {
     JustChecking,
     #[error("cannot disconnect genesis block")]
     Genesis,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{prelude::SliceRandom, Rng, SeedableRng};
+
+    // Split a number into a vector of random terms.
+    struct SplitTerms(u64);
+    impl Dummy<SplitTerms> for Vec<u64> {
+        fn dummy_with_rng<R: Rng + ?Sized>(number: &SplitTerms, rng: &mut R) -> Vec<u64> {
+            let SplitTerms(mut number) = *number;
+            let mut terms = vec![];
+            while number > 0 {
+                let term = rng.gen_range(1..=number);
+                number -= term;
+                terms.push(term);
+            }
+            terms
+        }
+    }
+
+    #[quickcheck]
+    fn terms_sum_to_number(number: u64) -> bool {
+        let terms = SplitTerms(number).fake::<Vec<u64>>();
+        terms.iter().sum::<u64>() == number
+    }
+
+    #[derive(Debug, Clone)]
+    struct Balances(HashMap<String, u64>);
+
+    impl quickcheck::Arbitrary for Balances {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            g.size().fake::<Balances>()
+        }
+    }
+
+    impl Dummy<usize> for Balances {
+        // Generates a random Address -> Amount balances HashMap.
+        fn dummy_with_rng<R: Rng + ?Sized>(size: &usize, rng: &mut R) -> Balances {
+            const ADDRESS_LENGTH: usize = 10;
+            let max_amount: u64 = Amount::MAX_MONEY.to_sat() / (*size as u64);
+            let balances: HashMap<String, u64> = (0..*size)
+                .map(|_| {
+                    let address = ADDRESS_LENGTH.fake::<String>();
+                    let balance = (0..max_amount).fake::<u64>();
+                    (address, balance)
+                })
+                .collect();
+            Balances(balances)
+        }
+    }
+
+    impl Dummy<Balances> for HashMap<String, Vec<u64>> {
+        // Split balances into vectors of random terms.
+        fn dummy_with_rng<R: Rng + ?Sized>(
+            balances: &Balances,
+            rng: &mut R,
+        ) -> HashMap<String, Vec<u64>> {
+            let Balances(balances) = balances;
+            let balances = (*balances).clone();
+            balances
+                .into_iter()
+                .map(|(address, balance)| (address, SplitTerms(balance).fake()))
+                .collect()
+        }
+    }
+
+    #[quickcheck]
+    fn balance_terms_sum_to_balances(balances: HashMap<String, u64>) -> bool {
+        let split_balances = Balances(balances.clone()).fake::<HashMap<String, Vec<u64>>>();
+        let summed_balances = split_balances
+            .into_iter()
+            .map(|(address, terms)| (address, terms.iter().sum::<u64>()))
+            .collect();
+        balances == summed_balances
+    }
+
+    impl Dummy<Balances> for Vec<(String, u64)> {
+        // Convert balances into a shuffled sequence of (address, delta) pairs.
+        fn dummy_with_rng<R: Rng + ?Sized>(balances: &Balances, rng: &mut R) -> Vec<(String, u64)> {
+            let balances_split_into_terms: HashMap<String, Vec<u64>> = balances.fake();
+            let mut address_delta_pairs: Vec<(String, u64)> = balances_split_into_terms
+                .into_iter()
+                .map(|(address, deltas)| std::iter::repeat(address).zip(deltas.into_iter()))
+                .flatten()
+                .collect();
+            address_delta_pairs.shuffle(rng);
+            address_delta_pairs
+        }
+    }
+
+    fn convert_to_totals(address_delta_pairs: Vec<(String, u64)>) -> Vec<(String, u64)> {
+        let mut address_total_pairs = vec![];
+        let mut total = 0;
+        for (address, delta) in address_delta_pairs {
+            total += delta;
+            address_total_pairs.push((address, total));
+        }
+        address_total_pairs
+    }
+
+    impl Dummy<Balances> for Vec<DepositUpdate> {
+        // Convert balances into a shuffled sequence of (address, delta) pairs.
+        fn dummy_with_rng<R: Rng + ?Sized>(balances: &Balances, rng: &mut R) -> Vec<DepositUpdate> {
+            let address_delta_pairs = balances.fake::<Vec<(String, u64)>>();
+            let address_total_pairs = convert_to_totals(address_delta_pairs);
+            let deposit_updates: Vec<DepositUpdate> = address_total_pairs
+                .iter()
+                .enumerate()
+                .map(|(index, (address, total))| {
+                    const MAX_VOUT: u32 = 100;
+                    let blockhash: [u8; 32] = Faker.fake();
+                    let blockhash = BlockHash::from_inner(blockhash);
+                    let txid: [u8; 32] = Faker.fake();
+                    let txid = Txid::from_inner(txid);
+                    let vout: u32 = (0..MAX_VOUT).fake();
+                    let ctip = OutPoint { txid, vout };
+                    DepositUpdate {
+                        index,
+                        blockhash,
+                        ctip,
+                        strdest: address.clone(),
+                        amount: Amount::from_sat(*total),
+                    }
+                })
+                .collect();
+            deposit_updates
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct DepositUpdates(pub Vec<DepositUpdate>);
+
+    pub struct DepositsFaker {
+        num_deposits: usize,
+        max_vout: usize,
+        balances: HashMap<String, u64>,
+    }
+
+    // impl Dummy<DepositsFaker> for DepositUpdates {
+    //     fn dummy_with_rng<R: Rng + ?Sized>(config: &DepositsFaker, rng: &mut R) -> DepositUpdates {}
+    // }
+
+    impl Dummy<Faker> for DepositUpdates {
+        fn dummy_with_rng<R: Rng + ?Sized>(_: &Faker, rng: &mut R) -> DepositUpdates {
+            const NUM_ADDRESSES: usize = 10;
+            const NUM_DEPOSITS: usize = 10000;
+            const MAX_VOUT: u32 = 100;
+            let max_amount: u64 = Amount::MAX_MONEY.to_sat() / (NUM_DEPOSITS as u64);
+            let mut amount = Amount::ZERO;
+
+            let addresses: Vec<String> =
+                (0..NUM_ADDRESSES).map(|_| Faker.fake::<String>()).collect();
+            let deposit_updates = (0..NUM_DEPOSITS)
+                .map(|index| {
+                    let blockhash: [u8; 32] = Faker.fake();
+                    let blockhash = BlockHash::from_inner(blockhash);
+                    let txid: [u8; 32] = Faker.fake();
+                    let txid = Txid::from_inner(txid);
+                    let vout: u32 = (0..MAX_VOUT).fake();
+                    let delta: u64 = (0..max_amount).fake();
+                    let delta = Amount::from_sat(delta);
+                    amount += delta;
+                    let strdest: String = addresses.choose(rng).unwrap().clone();
+
+                    DepositUpdate {
+                        index,
+                        blockhash,
+                        ctip: OutPoint { txid, vout },
+                        amount,
+                        strdest,
+                    }
+                })
+                .collect();
+            DepositUpdates(deposit_updates)
+        }
+    }
+
+    #[quickcheck]
+    fn deposits_work(balances: Balances) -> bool {
+        let mut db = DB::new("/tmp/drivechain").unwrap();
+        let deposit_updates = balances.fake::<Vec<DepositUpdate>>();
+        db._update_deposits(&deposit_updates).unwrap();
+        let outputs = db._get_deposit_outputs().unwrap();
+        balances.0 == outputs
+    }
 }
