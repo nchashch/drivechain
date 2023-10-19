@@ -338,8 +338,8 @@ impl Drivechain {
     pub fn connect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &HashMap<db::Outpoint, withdrawal::Withdrawal>,
-        refunds: &HashMap<db::Outpoint, u64>,
+        withdrawals: &HashMap<Vec<u8>, withdrawal::Withdrawal>,
+        refunds: &HashMap<Vec<u8>, u64>,
         just_check: bool,
     ) -> Result<(), Error> {
         let height = self.db.get_last_bmm_commitment_main_block_height()?;
@@ -354,8 +354,8 @@ impl Drivechain {
     pub fn disconnect_block(
         &mut self,
         deposits: &[Deposit],
-        withdrawals: &[db::Outpoint],
-        refunds: &[db::Outpoint],
+        withdrawals: &[Vec<u8>],
+        refunds: &[Vec<u8>],
         just_check: bool,
     ) -> Result<(), Error> {
         self.db
@@ -419,7 +419,7 @@ impl Drivechain {
     }
 
     /// Get withdrawals that are not spent and not being voted on.
-    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<db::Outpoint, Withdrawal>, Error> {
+    pub fn get_unspent_withdrawals(&self) -> Result<HashMap<Vec<u8>, Withdrawal>, Error> {
         self.db.get_unspent_withdrawals().map_err(|err| err.into())
     }
 

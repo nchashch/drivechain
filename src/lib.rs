@@ -2,3 +2,5 @@
 // FIXME: Write a tutorial for building sidechains here.
 mod drive;
 pub use drive::*;
+pub use bitcoin;
+pub use hex;
