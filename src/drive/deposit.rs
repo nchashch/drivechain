@@ -1,17 +1,31 @@
 use bitcoin::blockdata::transaction::{OutPoint, Transaction};
-use bitcoin::hash_types::{BlockHash};
+use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::Hash;
 use bitcoin::util::amount::Amount;
-use bitcoin::util::psbt::serialize::{Deserialize, Serialize};
 use serde::de::Error;
+
+#[derive(Debug, Clone)]
+pub struct DepositUpdate {
+    pub index: usize,
+    pub blockhash: BlockHash,
+    pub ctip: OutPoint,
+    pub amount: Amount,
+    pub strdest: String,
+}
+
+impl DepositUpdate {
+    pub fn spends(&self, other: &DepositUpdate) -> bool {
+        return self.index > other.index && self.index - other.index == 1;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MainDeposit {
     pub blockhash: BlockHash,
-    pub ntx: usize,
+    pub ntx: usize, // not important
     pub nburnindex: usize,
     pub tx: Transaction,
-    pub nsidechain: usize,
+    pub nsidechain: usize, // not important
     pub strdest: String,
 }
 
@@ -34,7 +48,7 @@ impl serde::Serialize for MainDeposit {
             blockhash: *self.blockhash.as_inner(),
             ntx: self.ntx,
             nburnindex: self.nburnindex,
-            tx: self.tx.serialize(),
+            tx: bitcoin::psbt::serialize::Serialize::serialize(&self.tx),
             nsidechain: self.nsidechain,
             strdest: self.strdest.clone(),
         };
@@ -50,7 +64,9 @@ impl<'de> serde::Deserialize<'de> for MainDeposit {
     {
         match SerdeMainDeposit::deserialize(deserializer) {
             Ok(sd) => {
-                let tx = match Transaction::deserialize(sd.tx.as_slice()) {
+                let tx = match <Transaction as bitcoin::psbt::serialize::Deserialize>::deserialize(
+                    sd.tx.as_slice(),
+                ) {
                     Ok(tx) => Ok(tx),
                     Err(err) => Err(D::Error::custom(err)),
                 };
@@ -81,6 +97,15 @@ impl MainDeposit {
         Amount::from_sat(self.tx.output[self.nburnindex].value)
     }
 
+    pub fn spends(&self, ctip: &OutPoint) -> bool {
+        self.tx
+            .input
+            .iter()
+            .filter(|input| input.previous_output == *ctip)
+            .count()
+            == 1
+    }
+
     pub fn is_spent_by(&self, other: &MainDeposit) -> bool {
         other
             .tx
@@ -92,10 +117,11 @@ impl MainDeposit {
     }
 }
 
-/// A deposit that must be paid out in a sidechain block.
+/// A deposit output.
 #[derive(Debug)]
 pub struct Deposit {
-    /// Sidechain address to which an `amount` of satoshi must be paid out.
+    /// Sidechain address without s{sidechain_number}_ prefix and checksum
+    /// postfix.
     pub address: String,
     /// Amount of satoshi to be deposited.
     pub amount: u64,

@@ -189,81 +189,6 @@ impl Drivechain {
         Ok(address.to_string())
     }
 
-    fn update_deposits(&self, height: Option<usize>) -> Result<(), Error> {
-        let mut last_deposit = self
-            .db
-            .get_last_deposit()?
-            .map(|(_, last_deposit)| last_deposit);
-        trace!("updating deposits, last known deposit = {:?}", last_deposit);
-        while !last_deposit.clone().map_or(true, |last_deposit| {
-            self.client.verify_deposit(&last_deposit).unwrap_or(false)
-        }) {
-            trace!("removing invalid last deposit = {:?}", last_deposit);
-            self.db.remove_last_deposit()?;
-            last_deposit = self
-                .db
-                .get_last_deposit()?
-                .map(|(_, last_deposit)| last_deposit);
-        }
-        let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
-        let deposits = self.client.get_deposits(last_output)?;
-        let deposits = match height {
-            Some(height) => {
-                // FIXME: Add height field to listsidechaindeposits mainchain
-                // RPC to get rid of this code.
-                let heights: HashMap<BlockHash, usize> = deposits
-                    .iter()
-                    .map(|deposit| {
-                        Ok((
-                            deposit.blockhash,
-                            self.client.get_main_block_height(&deposit.blockhash)?,
-                        ))
-                    })
-                    .collect::<Result<HashMap<BlockHash, usize>, Error>>()?;
-                deposits
-                    .into_iter()
-                    .filter(|deposit| heights[&deposit.blockhash] < height)
-                    .collect()
-            }
-            None => deposits,
-        };
-        self.db.update_deposits(deposits.as_slice())?;
-        let last_deposit = self
-            .db
-            .get_last_deposit()?
-            .map(|(_, last_deposit)| last_deposit);
-        trace!(
-            "deposits were updated, new last known deposit = {:?}",
-            last_deposit
-        );
-        Ok(())
-    }
-
-    fn update_bundles(&mut self) -> Result<(), Error> {
-        trace!("updating bundle statuses");
-        let known_failed = self.db.get_failed_bundle_hashes()?;
-        let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
-        let failed = failed.difference(&known_failed);
-        for txid in failed {
-            trace!("bundle {} failed", txid);
-            self.db.fail_bundle(txid)?;
-        }
-        let known_spent = self.db.get_spent_bundle_hashes()?;
-        let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
-        let spent = spent.difference(&known_spent);
-        for txid in spent {
-            trace!("bundle {} is spent", txid);
-            self.db.spend_bundle(txid)?;
-        }
-        let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
-        for txid in voting {
-            trace!("bundle {} is being voted on", txid);
-            self.db.vote_bundle(&txid)?;
-        }
-        trace!("bundle statuses were updated successfuly");
-        Ok(())
-    }
-
     // TODO: Raise alarm if bundle hash being voted on is wrong.
     fn attempt_bundle_broadcast(&mut self) -> Result<(), Error> {
         trace!("attempting to create and broadcast a new bundle");
@@ -333,6 +258,31 @@ impl Drivechain {
         })
     }
 
+    fn update_bundles(&mut self) -> Result<(), Error> {
+        trace!("updating bundle statuses");
+        let known_failed = self.db.get_failed_bundle_hashes()?;
+        let failed = self.client.get_failed_withdrawal_bundle_hashes()?;
+        let failed = failed.difference(&known_failed);
+        for txid in failed {
+            trace!("bundle {} failed", txid);
+            self.db.fail_bundle(txid)?;
+        }
+        let known_spent = self.db.get_spent_bundle_hashes()?;
+        let spent = self.client.get_spent_withdrawal_bundle_hashes()?;
+        let spent = spent.difference(&known_spent);
+        for txid in spent {
+            trace!("bundle {} is spent", txid);
+            self.db.spend_bundle(txid)?;
+        }
+        let voting = self.client.get_voting_withdrawal_bundle_hashes()?;
+        for txid in voting {
+            trace!("bundle {} is being voted on", txid);
+            self.db.vote_bundle(&txid)?;
+        }
+        trace!("bundle statuses were updated successfuly");
+        Ok(())
+    }
+
     /// This must be called when a sidechain block becomes part of consensus
     /// (most likely when it was successfuly BMMed).
     pub fn connect_block(
@@ -346,6 +296,56 @@ impl Drivechain {
         self.update_deposits(height)?;
         self.db
             .connect_block(deposits, withdrawals, refunds, just_check)?;
+        Ok(())
+    }
+
+    fn update_deposits(&self, height: Option<usize>) -> Result<(), Error> {
+        let mut last_deposit = self
+            .db
+            .get_last_deposit()?
+            .map(|(_, last_deposit)| last_deposit);
+        trace!("updating deposits, last known deposit = {:?}", last_deposit);
+        while !last_deposit.clone().map_or(true, |last_deposit| {
+            self.client.verify_deposit(&last_deposit).unwrap_or(false)
+        }) {
+            trace!("removing invalid last deposit = {:?}", last_deposit);
+            self.db.remove_last_deposit()?;
+            last_deposit = self
+                .db
+                .get_last_deposit()?
+                .map(|(_, last_deposit)| last_deposit);
+        }
+        let last_output = last_deposit.map(|deposit| (deposit.tx.txid(), deposit.nburnindex));
+        let deposits = self.client.get_deposits(last_output)?;
+        let deposits = match height {
+            Some(height) => {
+                // FIXME: Add height field to listsidechaindeposits mainchain
+                // RPC to get rid of this code.
+                let heights: HashMap<BlockHash, usize> = deposits
+                    .iter()
+                    .map(|deposit| {
+                        Ok((
+                            deposit.blockhash,
+                            self.client.get_main_block_height(&deposit.blockhash)?,
+                        ))
+                    })
+                    .collect::<Result<HashMap<BlockHash, usize>, Error>>()?;
+                deposits
+                    .into_iter()
+                    .filter(|deposit| heights[&deposit.blockhash] < height)
+                    .collect()
+            }
+            None => deposits,
+        };
+        self.db.update_deposits(deposits.as_slice())?;
+        let last_deposit = self
+            .db
+            .get_last_deposit()?
+            .map(|(_, last_deposit)| last_deposit);
+        trace!(
+            "deposits were updated, new last known deposit = {:?}",
+            last_deposit
+        );
         Ok(())
     }
 
